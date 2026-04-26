@@ -458,10 +458,10 @@ public class BalancedRedisQueueTest {
 
     // ACT
     List<String> visited = new ArrayList<>();
-    Visitor<BalancedQueueEntry> visitor =
+    Visitor<BalancedQueueEntry<String>> visitor =
         new Visitor<>() {
-          public void visit(BalancedQueueEntry entry) {
-            visited.add(entry.getValue());
+          public void visit(BalancedQueueEntry<String> entry) {
+            visited.add(entry.value());
           }
         };
     queue.visit(jedis, visitor);
@@ -498,10 +498,10 @@ public class BalancedRedisQueueTest {
 
     // ACT
     List<String> visited = new ArrayList<>();
-    Visitor<BalancedQueueEntry> visitor =
+    Visitor<BalancedQueueEntry<String>> visitor =
         new Visitor<>() {
-          public void visit(BalancedQueueEntry entry) {
-            visited.add(entry.getValue());
+          public void visit(BalancedQueueEntry<String> entry) {
+            visited.add(entry.value());
           }
         };
     queue.visit(jedis, visitor);

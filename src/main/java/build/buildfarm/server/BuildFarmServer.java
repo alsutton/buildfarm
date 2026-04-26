@@ -37,12 +37,14 @@ import build.buildfarm.server.services.FetchService;
 import build.buildfarm.server.services.OperationQueueService;
 import build.buildfarm.server.services.OperationsService;
 import build.buildfarm.server.services.PublishBuildEventService;
+import build.buildfarm.server.services.WorkerProfileService;
 import io.grpc.ServerBuilder;
 import io.grpc.ServerInterceptor;
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.protobuf.services.HealthStatusManager;
 import io.grpc.protobuf.services.ProtoReflectionService;
+import io.grpc.services.ChannelzService;
 import io.grpc.util.TransmitStatusRuntimeExceptionInterceptor;
 import io.prometheus.client.Counter;
 import java.io.File;
@@ -161,8 +163,12 @@ public class BuildFarmServer extends LoggingMain {
         .addService(new FetchService(instance))
         .addService(ProtoReflectionService.newInstance())
         .addService(new PublishBuildEventService())
+        .addService(new WorkerProfileService(instance))
         .intercept(TransmitStatusRuntimeExceptionInterceptor.instance())
         .intercept(headersInterceptor);
+    if (configs.getServer().isGrpcChannelz()) {
+      serverBuilder.addService(ChannelzService.newInstance(/* maxPageSize= */ 100));
+    }
     GrpcMetrics.handleGrpcMetricIntercepts(serverBuilder, configs.getServer().getGrpcMetrics());
 
     if (configs.getServer().getMaxInboundMessageSizeBytes() != 0) {

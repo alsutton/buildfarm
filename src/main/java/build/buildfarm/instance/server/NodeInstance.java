@@ -83,6 +83,7 @@ import build.buildfarm.common.resources.DownloadBlobRequest;
 import build.buildfarm.common.resources.ResourceParser;
 import build.buildfarm.instance.Instance;
 import build.buildfarm.instance.InstanceBase;
+import build.buildfarm.v1test.BatchWorkerProfilesResponse;
 import build.buildfarm.v1test.Digest;
 import build.buildfarm.v1test.GetClientStartTimeRequest;
 import build.buildfarm.v1test.GetClientStartTimeResult;
@@ -90,7 +91,6 @@ import build.buildfarm.v1test.PrepareWorkerForGracefulShutDownRequestResults;
 import build.buildfarm.v1test.QueuedOperation;
 import build.buildfarm.v1test.QueuedOperationMetadata;
 import build.buildfarm.v1test.Tree;
-import build.buildfarm.v1test.WorkerListMessage;
 import build.buildfarm.v1test.WorkerProfileMessage;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
@@ -128,6 +128,7 @@ import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.NoSuchFileException;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -144,9 +145,9 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
-import javax.annotation.Nullable;
 import lombok.extern.java.Log;
 import org.apache.http.auth.Credentials;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public abstract class NodeInstance extends InstanceBase {
@@ -413,6 +414,11 @@ public abstract class NodeInstance extends InstanceBase {
       RequestMetadata requestMetadata)
       throws IOException {
     return contentAddressableStorage.newInput(compressor, digest, offset);
+  }
+
+  @Override
+  public boolean isReadOnly() {
+    return contentAddressableStorage.isReadOnly();
   }
 
   @Override
@@ -738,19 +744,75 @@ public abstract class NodeInstance extends InstanceBase {
     return fetchBlobUrls(urls.build(), headers, expectedDigest, requestMetadata);
   }
 
+  private static final String INDEXED_HEADER_REGEX = "^\\d+:.*$";
+
+  /**
+   * Some headers in `allHeaders` are intended ONLY for specific URLs indexes, for example, AUTH
+   * headers that we wouldn't want exposed to all URL (mirrors).
+   *
+   * <p>If a header is prefixed with "<int>:", it is intended for the URL at index <int>. If a
+   * header is not prefixed, it is intended for all URLs. If a header is indexed, it is higher
+   * priority and will override existing headers with the same key.
+   *
+   * @param allHeaders headers from the request. Some may begin with index, but not necessarily.
+   * @return
+   */
+  @VisibleForTesting
+  static Map<Integer, Map<String, String>> createHeadersMapView(
+      Map<String, String> allHeaders, Map<String, String> globalHeaders) {
+    Map<Integer, Map<String, String>> headersMapView = new HashMap<>();
+
+    // Second pass: process index headers and merge with globals
+    allHeaders.forEach(
+        (key, value) -> {
+          if (key.matches(INDEXED_HEADER_REGEX)) {
+            // It's an indexed header
+            int colonIndex = key.indexOf(':');
+            int urlIndex = Integer.parseInt(key.substring(0, colonIndex));
+            String headerKey = key.substring(colonIndex + 1);
+
+            // Get or create the map for this index and initialize with global headers
+            Map<String, String> indexMap =
+                headersMapView.computeIfAbsent(urlIndex, k -> new HashMap<>(globalHeaders));
+
+            // Add/overwrite with the index-specific header
+            indexMap.put(headerKey, value);
+          }
+        });
+    return headersMapView;
+  }
+
+  /**
+   * All non-indexed headers are intended for all URLs.
+   *
+   * @param headers headers from the request. Some may begin with index, but not necessarily.
+   * @return Filtered headers where index headers are removed
+   */
+  static Map<String, String> calculateGlobalHeaders(Map<String, String> headers) {
+    return headers.entrySet().stream()
+        .filter((entry) -> !entry.getKey().matches(INDEXED_HEADER_REGEX))
+        .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+  }
+
   @VisibleForTesting
   ListenableFuture<Digest> fetchBlobUrls(
       Iterable<URL> urls,
       Map<String, String> headers,
       Digest expectedDigest,
       RequestMetadata requestMetadata) {
+    // First pass: collect global headers
+    // These apply to all URLs.
+    Map<String, String> globalHeaders = calculateGlobalHeaders(headers);
+    // generate a map of headers for each URL, indexed by URL index
+    Map<Integer, Map<String, String>> headersMapView = createHeadersMapView(headers, globalHeaders);
+    int urlIndex = 0;
     for (URL url : urls) {
       try {
         // some minor abuse here, we want the download to set our built digest size as side effect
         return downloadUrl(
             url,
             expectedDigest.getHash(),
-            headers,
+            headersMapView.getOrDefault(urlIndex, globalHeaders),
             new DigestUtil(HashFunction.get(expectedDigest.getDigestFunction())),
             actualDigest -> {
               if (!expectedDigest.getHash().isEmpty()
@@ -766,6 +828,7 @@ public abstract class NodeInstance extends InstanceBase {
         log.log(Level.WARNING, "download attempt failed", e);
         // ignore?
       }
+      urlIndex++;
     }
     return immediateFailedFuture(new NoSuchFileException(expectedDigest.getHash()));
   }
@@ -1262,8 +1325,6 @@ public abstract class NodeInstance extends InstanceBase {
       Set<String> inputDirectories,
       Map<build.bazel.remote.execution.v2.Digest, Directory> directoriesIndex,
       PreconditionFailure.Builder preconditionFailure) {
-    validatePlatform(command.getPlatform(), preconditionFailure);
-
     // FIXME should input/output collisions (through directories) be another
     // invalid action?
     filesUniqueAndSortedPrecondition(command.getOutputFilesList(), preconditionFailure);
@@ -1332,6 +1393,13 @@ public abstract class NodeInstance extends InstanceBase {
     ImmutableSet.Builder<String> inputDirectoriesBuilder = ImmutableSet.builder();
     ImmutableSet.Builder<String> inputFilesBuilder = ImmutableSet.builder();
 
+    if (action.hasPlatform()) {
+      // version 2.2: clients SHOULD set these platform properties as well
+      // as those in the [Command][build.bazel.remote.execution.v2.Command]. Servers
+      // SHOULD prefer those set here.
+      validatePlatform(action.getPlatform(), preconditionFailure);
+    }
+
     inputDirectoriesBuilder.add(ACTION_INPUT_ROOT_DIRECTORY_PATH);
     boolean allowSymlinkTargetAbsolute =
         getCacheCapabilities().getSymlinkAbsolutePathStrategy()
@@ -1358,6 +1426,9 @@ public abstract class NodeInstance extends InstanceBase {
                       DigestUtil.fromDigest(action.getCommandDigest(), digestFunction)))
           .setDescription(MISSING_COMMAND);
     } else {
+      if (!action.hasPlatform()) {
+        validatePlatform(command.getPlatform(), preconditionFailure);
+      }
       validateCommand(
           command,
           action.getInputRootDigest(),
@@ -1729,6 +1800,7 @@ public abstract class NodeInstance extends InstanceBase {
             ActionCacheUpdateCapabilities.newBuilder().setUpdateEnabled(true))
         .setMaxBatchTotalSizeBytes(Size.mbToBytes(4))
         .setSymlinkAbsolutePathStrategy(SymlinkAbsolutePathStrategy.Value.DISALLOWED)
+        .setMaxCasBlobSizeBytes(configs.getMaxEntrySizeBytes())
 
         // Compression support
         .addSupportedCompressors(Compressor.Value.IDENTITY)
@@ -1769,20 +1841,21 @@ public abstract class NodeInstance extends InstanceBase {
   }
 
   @Override
-  public WorkerProfileMessage getWorkerProfile() {
+  public ListenableFuture<WorkerProfileMessage> getWorkerProfile(String name) {
     throw new UnsupportedOperationException(
         "NodeInstance doesn't support getWorkerProfile() method.");
   }
 
   @Override
-  public WorkerListMessage getWorkerList() {
-    throw new UnsupportedOperationException("NodeInstance doesn't support getWorkerList() method.");
+  public ListenableFuture<BatchWorkerProfilesResponse> batchWorkerProfiles(Iterable<String> names) {
+    throw new UnsupportedOperationException(
+        "NodeInstance doesn't support batchWorkerProfiles() method.");
   }
 
   @Override
   public PrepareWorkerForGracefulShutDownRequestResults shutDownWorkerGracefully() {
     throw new UnsupportedOperationException(
-        "NodeInstance doesn't support drainWorkerPipeline() method.");
+        "NodeInstance doesn't support shutDownWorkerGracefully() method.");
   }
 
   @Override

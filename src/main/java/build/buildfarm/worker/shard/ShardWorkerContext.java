@@ -30,6 +30,7 @@ import build.bazel.remote.execution.v2.Directory;
 import build.bazel.remote.execution.v2.ExecutionStage;
 import build.bazel.remote.execution.v2.Platform;
 import build.buildfarm.backplane.Backplane;
+import build.buildfarm.cas.ContentAddressableStorage;
 import build.buildfarm.common.Claim;
 import build.buildfarm.common.CommandUtils;
 import build.buildfarm.common.DigestPath;
@@ -54,6 +55,7 @@ import build.buildfarm.instance.Instance;
 import build.buildfarm.v1test.Digest;
 import build.buildfarm.v1test.QueueEntry;
 import build.buildfarm.v1test.QueuedOperation;
+import build.buildfarm.v1test.WorkerExecutedMetadata;
 import build.buildfarm.worker.DequeueMatchEvaluator;
 import build.buildfarm.worker.ExecFileSystem;
 import build.buildfarm.worker.ExecutionPolicies;
@@ -86,21 +88,27 @@ import io.prometheus.client.Counter;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.FileVisitOption;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.UserPrincipal;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 class ShardWorkerContext implements WorkerContext {
+  private static Set<FileVisitOption> NOFOLLOW_LINKS = EnumSet.noneOf(FileVisitOption.class);
+  private static Set<FileVisitOption> FOLLOW_LINKS = EnumSet.of(FileVisitOption.FOLLOW_LINKS);
+
   static final String EXEC_OWNER_RESOURCE_NAME = "exec-owner";
   private static final Platform.Property EXEC_OWNER_PROPERTY =
       Platform.Property.newBuilder().setName(EXEC_OWNER_RESOURCE_NAME).setValue("1").build();
@@ -140,9 +148,14 @@ class ShardWorkerContext implements WorkerContext {
   private final LocalResourceSet resourceSet;
   private final boolean errorOperationOutputSizeExceeded;
   private final boolean provideOwnedClaim;
+  private boolean inGracefulShutdown = false;
+  private boolean pauseMatch = false;
+  private boolean pauseInputFetch = false;
+  private boolean pauseExecute = false;
+  private boolean pauseReportResult = false;
 
   static SetMultimap<String, String> getMatchProvisions(
-      Iterable<ExecutionPolicy> policies, String name, int executeStageWidth) {
+      Iterable<ExecutionPolicy> policies, Iterable<String> workerNames, int executeStageWidth) {
     ImmutableSetMultimap.Builder<String, String> provisions = ImmutableSetMultimap.builder();
     Platform matchPlatform =
         ExecutionPolicies.getMatchPlatform(
@@ -151,12 +164,46 @@ class ShardWorkerContext implements WorkerContext {
       provisions.put(property.getName(), property.getValue());
     }
     provisions.put(PROVISION_CORES_NAME, String.format("%d", executeStageWidth));
-    provisions.put(ExecutionProperties.WORKER, name);
+    for (String workerName : workerNames) {
+      provisions.put(ExecutionProperties.WORKER, workerName);
+    }
     return provisions.build();
   }
 
+  /**
+   * @brief Worker lifetime-persistent Context
+   * @details Intended to manage backplane, CFC exec filesystem, and CAS storage interactions
+   * @param name Name used to identify this worker on executions
+   * @param matchWorkerNames All names where this worker should match Worker platform properties
+   * @param operationPollPeriod Duration between active execution poller runs
+   * @param operationPoller Poller activity on periodic runs
+   * @param inputFetchStageWidth Number of execution slots for concurrent input fetches
+   * @param executeStageWidth Number of execution slots for concurrent action execution
+   * @param reportResultStageWidth Number of execution slots for concurrent result reports/cleanup
+   * @param inputFetchDeadline The duration input fetch must complete in before return to queue
+   * @param backplane A source of truth and reporting for execution and content
+   * @param execFileSystem Manager of execution filesystem presentation
+   * @param inputStreamFactory Supplier of CAS streams for reading
+   * @param policies Policies which will/can be applied to executions
+   * @param instance Instance used for ActionResult post and Operation lease reporting
+   * @param defaultActionTimeout Duration if timeout is unspecified per-execution for execute abort
+   * @param maximumActionTimeout Duration above which per-execution timeout is rejected
+   * @param defaultMaxCores The default consumption of execution stage slots per execution
+   * @param limitGlobalExecution Whether to limit the sum of execution cpu utilization to
+   *     executeStageWidth
+   * @param onlyMulticoreTests Whether to respect any cores selection of non-tests
+   * @param allowBringYourOwnContainer Whether an execution may specify a container wrapper for
+   *     execution
+   * @param errorOperationRemainingResources Whether an execution with remaining pids attached to
+   *     its limited resources after exit is an error
+   * @param errorOperationOutputSizeExceeded Whether an execution that exceeds the storage max entry
+   *     size of an output is an error
+   * @param resourceSet The resources available to the worker
+   * @param writer The CAS writer for output content of executions
+   */
   ShardWorkerContext(
       String name,
+      Iterable<String> matchWorkerNames,
       Duration operationPollPeriod,
       OperationPoller operationPoller,
       int inputFetchStageWidth,
@@ -179,7 +226,7 @@ class ShardWorkerContext implements WorkerContext {
       LocalResourceSet resourceSet,
       CasWriter writer) {
     this.name = name;
-    this.matchProvisions = getMatchProvisions(policies, name, executeStageWidth);
+    this.matchProvisions = getMatchProvisions(policies, matchWorkerNames, executeStageWidth);
     this.operationPollPeriod = operationPollPeriod;
     this.operationPoller = operationPoller;
     this.inputFetchStageWidth = inputFetchStageWidth;
@@ -214,6 +261,16 @@ class ShardWorkerContext implements WorkerContext {
             /*options.experimentalRemoteRetryJitter=*/ 0.1,
             /*options.experimentalRemoteRetryMaxAttempts=*/ 5),
         Retrier.REDIS_IS_RETRIABLE);
+  }
+
+  @Override
+  public boolean inGracefulShutdown() {
+    return inGracefulShutdown;
+  }
+
+  @Override
+  public void prepareForGracefulShutdown() {
+    inGracefulShutdown = true;
   }
 
   @Override
@@ -383,6 +440,16 @@ class ShardWorkerContext implements WorkerContext {
     return queueEntry;
   }
 
+  /** wait until matching should occur, false return indicates that we are shutting down */
+  private boolean waitToMatch() throws InterruptedException {
+    ContentAddressableStorage storage = execFileSystem.getStorage();
+    // we may want to get interrupted when match is paused
+    while (!inGracefulShutdown && storage.isReadOnly()) {
+      storage.waitForWritable(java.time.Duration.ofSeconds(1));
+    }
+    return !inGracefulShutdown;
+  }
+
   @Override
   public void match(MatchListener listener) throws InterruptedException {
     RetryingMatchListener dedupMatchListener =
@@ -442,7 +509,7 @@ class ShardWorkerContext implements WorkerContext {
             throw new RuntimeException(t);
           }
         };
-    while (!dedupMatchListener.isMatched()) {
+    while (waitToMatch() && !dedupMatchListener.isMatched()) {
       try {
         matchInterruptible(dedupMatchListener);
       } catch (IOException e) {
@@ -676,9 +743,10 @@ class ShardWorkerContext implements WorkerContext {
                         + "the maximum size of an entry");
           }
         };
-    TreeWalker treeWalker =
-        new TreeWalker(configs.getWorker().isCreateSymlinkOutputs(), digestUtil, fileObserver);
-    Files.walkFileTree(outputDirPath, treeWalker);
+    Set<FileVisitOption> options =
+        configs.getWorker().isCreateSymlinkOutputs() ? NOFOLLOW_LINKS : FOLLOW_LINKS;
+    TreeWalker treeWalker = new TreeWalker(digestUtil, fileObserver);
+    Files.walkFileTree(outputDirPath, options, Integer.MAX_VALUE, treeWalker);
     ByteString treeBlob = treeWalker.getTree().toByteString();
     Digest treeDigest = digestUtil.compute(treeBlob);
     insertBlob(treeDigest, treeBlob);
@@ -757,10 +825,17 @@ class ShardWorkerContext implements WorkerContext {
       DigestFunction.Value digestFunction,
       Action action,
       Command command,
-      @Nullable UserPrincipal owner)
+      @Nullable UserPrincipal owner,
+      WorkerExecutedMetadata.Builder workerExecutedMetadata)
       throws IOException, InterruptedException {
     return execFileSystem.createExecDir(
-        operationName, directoriesIndex, digestFunction, action, command, owner);
+        operationName,
+        directoriesIndex,
+        digestFunction,
+        action,
+        command,
+        owner,
+        workerExecutedMetadata);
   }
 
   // might want to split for removeDirectory and decrement references to avoid removing for streamed
@@ -771,11 +846,11 @@ class ShardWorkerContext implements WorkerContext {
   }
 
   @Override
-  public void blacklistAction(String actionId) throws IOException, InterruptedException {
+  public void blocklistAction(String actionId) throws IOException, InterruptedException {
     createBackplaneRetrier()
         .execute(
             () -> {
-              backplane.blacklistAction(actionId);
+              backplane.blocklistAction(actionId);
               return null;
             });
   }
@@ -819,20 +894,14 @@ class ShardWorkerContext implements WorkerContext {
 
   void createOperationExecutionLimits() {
     try {
-      int availableProcessors = SystemProcessors.get();
-      Preconditions.checkState(availableProcessors >= executeStageWidth);
-      int executionsShares =
-          Group.getRoot().getCpu().getShares() * executeStageWidth / availableProcessors;
-      executionsGroup.getCpu().setShares(executionsShares);
-      if (executeStageWidth < availableProcessors) {
+      if (executeStageWidth < SystemProcessors.get()) {
         /* only divide up our cfs quota if we need to limit below the available processors for executions */
-        executionsGroup
-            .getCpu()
-            .setCFSQuota(executeStageWidth * Group.getRoot().getCpu().getCFSPeriod());
+        executionsGroup.getCpu().setMaxCpu(executeStageWidth);
       }
-      // create 1024 * execution width shares to choose from
-      operationsGroup.getCpu().setShares(executeStageWidth * 1024);
-    } catch (IOException e) {
+      // create `execution width` shares to choose from. This is the ceiling for the operations
+      operationsGroup.getCpu().setShares(executeStageWidth);
+    } catch (IOException | IllegalStateException e) {
+      log.log(Level.WARNING, "Unable to set up CGroup", e);
       try {
         operationsGroup.getCpu().close();
       } catch (IOException closeEx) {
@@ -871,7 +940,6 @@ class ShardWorkerContext implements WorkerContext {
   public ResourceLimits commandExecutionSettings(Command command) {
     return ResourceDecider.decideResourceLimitations(
         command,
-        name,
         defaultMaxCores,
         onlyMulticoreTests,
         limitGlobalExecution,
@@ -925,21 +993,11 @@ class ShardWorkerContext implements WorkerContext {
     if (configs.getWorker().getSandboxSettings().isAlwaysUseAsNobody() || limits.fakeUsername) {
       arguments.add(configs.getExecutionWrappers().getAsNobody());
     }
-
-    if (limits.time.skipSleep) {
-      arguments.add(configs.getExecutionWrappers().getSkipSleep());
-
-      // we set these values very high because we want sleep calls to return immediately.
-      arguments.add("90000000"); // delay factor
-      arguments.add("90000000"); // time factor
-      arguments.add(configs.getExecutionWrappers().getSkipSleepPreload());
-
-      if (limits.time.timeShift != 0) {
-        arguments.add(configs.getExecutionWrappers().getDelay());
-        arguments.add(String.valueOf(limits.time.timeShift));
-      }
-    }
     return resource;
+  }
+
+  private String getCgroups() {
+    return configs.getExecutionWrappers().getCgroups2();
   }
 
   IOResource limitSpecifiedExecution(
@@ -953,29 +1011,28 @@ class ShardWorkerContext implements WorkerContext {
     // and collect group names to use on the CLI.
     String operationId = getOperationId(operationName);
     ArrayList<IOResource> resources = new ArrayList<>();
-
     if (limits.cgroups) {
       final Group group = operationsGroup.getChild(operationId);
       ArrayList<String> usedGroups = new ArrayList<>();
 
       // Possibly set core restrictions.
       if (limits.cpu.limit) {
+        log.log(Level.FINEST, "Applying CPU limit {0}", limits.cpu);
         applyCpuLimits(group, owner, limits, resources);
-        usedGroups.add(group.getCpu().getName());
+        usedGroups.add(group.getCpu().getControllerName());
       }
 
       // Possibly set memory restrictions.
       if (limits.mem.limit) {
+        log.log(Level.FINEST, "Applying Mem limit {0}", limits.mem);
         applyMemLimits(group, owner, limits, resources);
-        usedGroups.add(group.getMem().getName());
+        usedGroups.add(group.getMem().getControllerName());
       }
 
       // Decide the CLI for running under cgroups
       if (!usedGroups.isEmpty()) {
         arguments.add(
-            configs.getExecutionWrappers().getCgroups(),
-            "-g",
-            String.join(",", usedGroups) + ":" + group.getHierarchy());
+            getCgroups(), "-g", String.join(",", usedGroups) + ":" + group.getHierarchy());
       }
     }
 
@@ -1079,12 +1136,10 @@ class ShardWorkerContext implements WorkerContext {
       }
 
       if (limits.cpu.max > 0) {
-        /* period of 100ms */
-        cpu.setCFSPeriod(100000);
-        cpu.setCFSQuota(limits.cpu.max * 100000);
+        cpu.setMaxCpu(limits.cpu.max);
       }
       if (limits.cpu.min > 0) {
-        cpu.setShares(limits.cpu.min * 1024);
+        cpu.setShares(limits.cpu.min);
       }
     } catch (IOException e) {
       // clear interrupt flag if set due to ClosedByInterruptException

@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
+# Copyright 2020-2025 The Buildfarm Authors. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # Run from the root of repository.
 # This script will format all of the java source files.
 # Use the flag --check if you want the script to fail when formatting is not correct.
 
 FORMAT_JAVA=true
+FORMAT_HAWKEYE=true
 REMOVE_NEWLINES_AFTER_START_BRACKET=true
 
 # Print an error such that it will surface in the context of buildkite
@@ -68,12 +83,12 @@ run_java_formatter () {
     if [ "${REMOVE_NEWLINES_AFTER_START_BRACKET:-false}" = true ]; then
         for file in $files
         do
-    	# Remove whitespace lines after starting bracket '{'
-    	# Ignore any issues if this does not succeed.
-    	# The CI doesn't gate on this adjustment.
+            # Remove whitespace lines after starting bracket '{'
+            # Ignore any issues if this does not succeed.
+            # The CI doesn't gate on this adjustment.
             awk -i inplace -v n=-2 'NR==n+1 && !NF{next} /\{/ {n=NR}1' $file > /dev/null 2>&1
         done
-    fi;
+    fi
 
     # Fixes formatting issues
     $LOCAL_FORMATTER -i $files
@@ -83,10 +98,26 @@ run_buildifier () {
     $BAZEL run $BUILDIFIER -- -r > /dev/null 2>&1
 }
 
+run_hawkeye() {
+  if [[ "$*" == "--check" ]]
+  then
+    $BAZEL run //tools/lint/hawkeye:hawkeye -- check --fail-if-unknown
+    handle_format_error_check
+    return
+  else
+    $BAZEL run //tools/lint/hawkeye:hawkeye -- format --fail-if-unknown
+
+  fi
+}
+
 if [ "${FORMAT_JAVA:-false}" = true ]; then
     run_java_formatter "$@"
 fi;
 
 if [ "${FORMAT_BUILD:-false}" = true ]; then
     run_buildifier "$@"
+fi;
+
+if [ "${FORMAT_HAWKEYE:-false}" = true ]; then
+    run_hawkeye "$@"
 fi;

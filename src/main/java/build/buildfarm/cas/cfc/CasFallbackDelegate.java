@@ -24,7 +24,7 @@ import java.io.InputStream;
 import java.nio.file.NoSuchFileException;
 import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
-import javax.annotation.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * @class CasFallbackDelegate
@@ -45,11 +45,11 @@ public class CasFallbackDelegate {
       @Nullable ContentAddressableStorage delegate,
       Consumer<Digest> onStartPut,
       ExecutorService removeDirectoryService,
-      boolean skipLoad)
-      throws IOException, InterruptedException {
+      boolean skipLoad,
+      boolean readonly) {
     // start delegate if we specifically have a CASFileCache
     if (delegate instanceof CASFileCache fileCacheDelegate) {
-      fileCacheDelegate.start(onStartPut, removeDirectoryService, skipLoad);
+      fileCacheDelegate.start(onStartPut, removeDirectoryService, skipLoad, readonly);
     }
   }
 

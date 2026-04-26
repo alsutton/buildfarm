@@ -9,6 +9,7 @@ server:
   name: shard
   actionCacheReadOnly: false
   port: 8980
+  grpcChannelz: false
   bindAddress: ''
   grpcMetrics:
     enabled: true
@@ -28,7 +29,7 @@ server:
   mergeExecutions: true
   runFailsafeOperation: true
   maxCpu: 0
-  maxRequeueAttempts: 5
+  maxRequeueAttempts: 3
   useDenyList: true
   grpcTimeout: 3600
   executeKeepaliveAfterSeconds: 60
@@ -45,7 +46,6 @@ server:
     deploymentEnvironment: AWS
     clusterEndpoint: grpc://localhost
   metrics:
-    publisher: LOG
     logLevel: FINEST
     topic: test
     topicMaxConnections: 1000
@@ -59,17 +59,18 @@ backplane:
   redisUsername:
   redisPassword:
   redisNodes:
-  jedisPoolMaxTotal: 4000
+  jedisPoolMaxTotal: 200
   jedisPoolMaxIdle: 8
   jedisPoolMinIdle: 0
   jedisTimeBetweenEvictionRunsMillis: 30000
+  connectionValidatedOnBorrow: false
   workersHashName: Workers
   workerChannel: WorkerChannel
   actionCachePrefix: ActionCache
   actionCacheExpire: 2419200 # 4 weeks
-  actionBlacklistPrefix: ActionBlacklist
-  actionBlacklistExpire: 3600 # 1 hour
-  invocationBlacklistPrefix: InvocationBlacklist
+  actionBlocklistPrefix: ActionBlocklist
+  actionBlocklistExpire: 3600 # 1 hour
+  invocationBlocklistPrefix: InvocationBlocklist
   operationPrefix: Operation
   operationExpire: 604800 # 1 week
   preQueuedOperationsListName: '{Arrival}:PreQueuedOperations'
@@ -104,6 +105,7 @@ backplane:
       value: '*'
 worker:
   port: 8981
+  grpcChannelz: false
   publicName: localhost:8981
   grpcMetrics:
     enabled: false
@@ -134,7 +136,7 @@ worker:
   linkExecFileSystem: true
   linkInputDirectories: true
   linkedInputDirectories:
-  - (?!external/)[^/]+
+  - ^(?!external$).*$
   execOwner:
   defaultMaxCores: 0
   limitGlobalExecution: false
@@ -145,14 +147,18 @@ worker:
   gracefulShutdownSeconds: 0
   sandboxSettings:
     alwaysUseSandbox: false
+    alwaysUseAsNobody: false
     alwaysUseCgroups: false
     alwaysUseTmpFs: false
+    additionalWritePaths: []
+    tmpFsPaths: []
     selectForBlockNetwork: false
     selectForTmpFs: false
   createSymlinkOutputs: false
   zstdBufferPoolSize: 2048
   executionPolicies:
   - name: test
+    prioritized: false
     executionWrapper:
       path: /
       arguments:
@@ -165,11 +171,8 @@ worker:
   persistentWorkerActionMnemonicAllowlist:
   - '*'
 executionWrappers:
-  cgroups: /usr/bin/cgexec
+  cgroups2: /app/build_buildfarm/cgexec-wrapper
   unshare: /usr/bin/unshare
   linuxSandbox: /app/build_buildfarm/linux-sandbox
   asNobody: /app/build_buildfarm/as-nobody
   processWrapper: /app/build_buildfarm/process-wrapper
-  skipSleep: /app/build_buildfarm/skip_sleep
-  skipSleepPreload: /app/build_buildfarm/skip_sleep_preload.so
-  delay: /app/build_buildfarm/delay.sh

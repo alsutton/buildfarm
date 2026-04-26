@@ -16,11 +16,11 @@ import build.buildfarm.common.DigestUtil.ActionKey;
 import build.buildfarm.common.Watcher;
 import build.buildfarm.common.Write;
 import build.buildfarm.v1test.BackplaneStatus;
+import build.buildfarm.v1test.BatchWorkerProfilesResponse;
 import build.buildfarm.v1test.GetClientStartTimeRequest;
 import build.buildfarm.v1test.GetClientStartTimeResult;
 import build.buildfarm.v1test.PrepareWorkerForGracefulShutDownRequestResults;
 import build.buildfarm.v1test.Tree;
-import build.buildfarm.v1test.WorkerListMessage;
 import build.buildfarm.v1test.WorkerProfileMessage;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.longrunning.Operation;
@@ -111,6 +111,11 @@ class DummyInstanceBase extends InstanceBase {
   @Override
   public String getTree(
       build.buildfarm.v1test.Digest rootDigest, int pageSize, String pageToken, Tree.Builder tree) {
+    throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public boolean isReadOnly() {
     throw new UnsupportedOperationException();
   }
 
@@ -209,12 +214,12 @@ class DummyInstanceBase extends InstanceBase {
   }
 
   @Override
-  public WorkerProfileMessage getWorkerProfile() {
+  public ListenableFuture<WorkerProfileMessage> getWorkerProfile(String name) {
     throw new UnsupportedOperationException();
   }
 
   @Override
-  public WorkerListMessage getWorkerList() {
+  public ListenableFuture<BatchWorkerProfilesResponse> batchWorkerProfiles(Iterable<String> names) {
     throw new UnsupportedOperationException();
   }
 

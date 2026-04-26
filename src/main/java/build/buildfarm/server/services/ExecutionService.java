@@ -45,8 +45,8 @@ import java.util.concurrent.CancellationException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public class ExecutionService extends ExecutionGrpc.ExecutionImplBase {
@@ -111,8 +111,7 @@ public class ExecutionService extends ExecutionGrpc.ExecutionImplBase {
       serverCallStreamObserver.setOnCancelHandler(this::cancel);
     }
 
-    @Nullable
-    ListenableFuture<?> getFuture() {
+    @Nullable ListenableFuture<?> getFuture() {
       return keepaliveFuture;
     }
 
@@ -204,20 +203,16 @@ public class ExecutionService extends ExecutionGrpc.ExecutionImplBase {
     }
     ServerCallStreamObserver<Operation> serverCallStreamObserver =
         (ServerCallStreamObserver<Operation>) responseObserver;
-    try {
-      RequestMetadata requestMetadata = TracingMetadataUtils.fromCurrentContext();
-      withCancellation(
-          serverCallStreamObserver,
-          instance.execute(
-              actionDigest,
-              request.getSkipCacheLookup(),
-              request.getExecutionPolicy(),
-              request.getResultsCachePolicy(),
-              requestMetadata,
-              createWatcher(serverCallStreamObserver, requestMetadata)));
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    }
+    RequestMetadata requestMetadata = TracingMetadataUtils.fromCurrentContext();
+    withCancellation(
+        serverCallStreamObserver,
+        instance.execute(
+            actionDigest,
+            request.getSkipCacheLookup(),
+            request.getExecutionPolicy(),
+            request.getResultsCachePolicy(),
+            requestMetadata,
+            createWatcher(serverCallStreamObserver, requestMetadata)));
   }
 
   private static MetricsPublisher getMetricsPublisher() {

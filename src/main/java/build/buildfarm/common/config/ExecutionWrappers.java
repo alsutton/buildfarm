@@ -26,11 +26,11 @@ import lombok.Data;
 @Data
 public class ExecutionWrappers {
   /**
-   * @field cgroups
-   * @brief The program to use when running actions under cgroups.
+   * @field cgroups2
+   * @brief The program to use when running actions under cgroups v2.
    * @details This program is expected to be packaged with the worker image.
    */
-  private String cgroups = "/usr/bin/cgexec";
+  private String cgroups2 = "/app/build_buildfarm/cgexec-wrapper";
 
   /**
    * @field unshare
@@ -60,26 +60,4 @@ public class ExecutionWrappers {
    * @details This program is expected to be packaged with the worker image.
    */
   private String processWrapper = "/app/build_buildfarm/process-wrapper";
-
-  /**
-   * @field skipSleep
-   * @brief The program to use when running actions under bazel's skip sleep wrapper.
-   * @details This program is expected to be packaged with the worker image.
-   */
-  private String skipSleep = "/app/build_buildfarm/skip_sleep";
-
-  /**
-   * @field skipSleepPreload
-   * @brief The shared object that the skip sleep wrapper uses to spoof syscalls.
-   * @details The shared object needs passed to the program which will LD_PRELOAD it.
-   */
-  private String skipSleepPreload = "/app/build_buildfarm/skip_sleep_preload.so";
-
-  /**
-   * @field delay
-   * @brief The program to used to timeshift actions when running under skip_sleep.
-   * @details This program is expected to be packaged with the worker image. Warning: This wrapper
-   *     is only intended to be used with skip_sleep.
-   */
-  private String delay = "/app/build_buildfarm/delay.sh";
 }

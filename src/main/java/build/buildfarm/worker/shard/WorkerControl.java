@@ -16,25 +16,26 @@ package build.buildfarm.worker.shard;
 
 import build.buildfarm.v1test.PrepareWorkerForGracefulShutDownRequest;
 import build.buildfarm.v1test.PrepareWorkerForGracefulShutDownRequestResults;
-import build.buildfarm.v1test.ShutDownWorkerGrpc;
+import build.buildfarm.v1test.WorkerControlGrpc;
+import build.buildfarm.v1test.WorkerPipelineChangeRequest;
+import build.buildfarm.v1test.WorkerPipelineChangeResponse;
 import io.grpc.stub.StreamObserver;
 import lombok.extern.java.Log;
 
 @Log
-public class ShutDownWorkerGracefully extends ShutDownWorkerGrpc.ShutDownWorkerImplBase {
+public class WorkerControl extends WorkerControlGrpc.WorkerControlImplBase {
   private final Worker worker;
 
-  public ShutDownWorkerGracefully(Worker worker) {
+  public WorkerControl(Worker worker) {
     this.worker = worker;
   }
 
   /**
    * Start point of worker graceful shutdown.
    *
-   * @param request
-   * @param responseObserver
+   * @param request Request to prepare worker for graceful shutdown
+   * @param responseObserver Response observer for the request
    */
-  @SuppressWarnings({"JavaDoc", "ConstantConditions"})
   @Override
   public void prepareWorkerForGracefulShutdown(
       PrepareWorkerForGracefulShutDownRequest request,
@@ -42,6 +43,28 @@ public class ShutDownWorkerGracefully extends ShutDownWorkerGrpc.ShutDownWorkerI
     try {
       worker.initiateShutdown();
       responseObserver.onNext(PrepareWorkerForGracefulShutDownRequestResults.newBuilder().build());
+      responseObserver.onCompleted();
+    } catch (Exception e) {
+      responseObserver.onError(e);
+    }
+  }
+
+  /**
+   * Pipeline change request handler.
+   *
+   * @param request Request to change worker pipeline
+   * @param responseObserver Response observer for the request
+   */
+  @Override
+  public void pipelineChange(
+      WorkerPipelineChangeRequest request,
+      StreamObserver<WorkerPipelineChangeResponse> responseObserver) {
+    try {
+      WorkerPipelineChangeResponse response =
+          WorkerPipelineChangeResponse.newBuilder()
+              .addAllChanges(worker.pipelineChange(request.getChangesList()))
+              .build();
+      responseObserver.onNext(response);
       responseObserver.onCompleted();
     } catch (Exception e) {
       responseObserver.onError(e);

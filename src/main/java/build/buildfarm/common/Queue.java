@@ -3,6 +3,7 @@ package build.buildfarm.common;
 import java.time.Duration;
 import java.util.function.Supplier;
 import redis.clients.jedis.AbstractPipeline;
+import redis.clients.jedis.resps.ScanResult;
 
 public interface Queue<E> {
   // java.util.BlockingQueue-ish
@@ -22,11 +23,13 @@ public interface Queue<E> {
   Supplier<Long> size(AbstractPipeline pipeline);
 
   // maybe switch to iterator?
-  void visit(Visitor<String> visitor);
+  void visit(Visitor<E> visitor);
 
-  void visitDequeue(Visitor<String> visitor);
+  void visitDequeue(Visitor<E> visitor);
 
   boolean removeFromDequeue(E e);
 
   void removeFromDequeue(AbstractPipeline pipeline, E e);
+
+  ScanResult<E> scan(String cursor, int count, String match);
 }

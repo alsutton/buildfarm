@@ -5,8 +5,8 @@ pkg_rpm(
     data = [
         ":server-service",
         "//examples:example_configs",
+        "//examples:example_properties",
         "//src/main/java/build/buildfarm:buildfarm-server_deploy.jar",
-        "//src/main/java/build/buildfarm:configs",
     ],
     release = "0",
     spec_file = "buildfarm-server.spec",

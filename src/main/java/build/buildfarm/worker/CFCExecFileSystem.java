@@ -14,13 +14,13 @@
 
 package build.buildfarm.worker;
 
-import static build.buildfarm.common.io.Utils.getInterruptiblyOrIOException;
 import static build.buildfarm.common.io.Utils.readdir;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.util.concurrent.Futures.allAsList;
 import static com.google.common.util.concurrent.Futures.catchingAsync;
 import static com.google.common.util.concurrent.Futures.immediateFailedFuture;
 import static com.google.common.util.concurrent.Futures.immediateFuture;
+import static com.google.common.util.concurrent.Futures.transform;
 import static com.google.common.util.concurrent.Futures.transformAsync;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.common.util.concurrent.MoreExecutors.listeningDecorator;
@@ -34,10 +34,12 @@ import build.bazel.remote.execution.v2.DigestFunction;
 import build.bazel.remote.execution.v2.Directory;
 import build.buildfarm.cas.ContentAddressableStorage;
 import build.buildfarm.cas.cfc.CASFileCache;
+import build.buildfarm.cas.cfc.CASFileCache.PathResult;
 import build.buildfarm.common.DigestUtil;
 import build.buildfarm.common.io.Directories;
 import build.buildfarm.common.io.Dirent;
 import build.buildfarm.v1test.Digest;
+import build.buildfarm.v1test.WorkerExecutedMetadata;
 import build.buildfarm.worker.ExecDirException.ViolationException;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
@@ -61,8 +63,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public class CFCExecFileSystem implements ExecFileSystem {
@@ -102,7 +104,8 @@ public class CFCExecFileSystem implements ExecFileSystem {
 
   @SuppressWarnings("ConstantConditions")
   @Override
-  public void start(Consumer<List<Digest>> onDigests, boolean skipLoad)
+  public ListenableFuture<Void> start(
+      Consumer<List<Digest>> onDigests, boolean skipLoad, boolean writable)
       throws IOException, InterruptedException {
     fileStore = Files.getFileStore(root);
     List<Dirent> dirents = null;
@@ -125,21 +128,31 @@ public class CFCExecFileSystem implements ExecFileSystem {
     }
 
     ImmutableList.Builder<Digest> blobDigests = ImmutableList.builder();
-    fileCache.start(
-        digest -> {
-          synchronized (blobDigests) {
-            blobDigests.add(digest);
-          }
-        },
-        removeDirectoryService,
-        skipLoad);
-    onDigests.accept(blobDigests.build());
+    ListenableFuture<Void> fileCacheWritable =
+        fileCache.start(
+            digest -> {
+              synchronized (blobDigests) {
+                blobDigests.add(digest);
+              }
+            },
+            removeDirectoryService,
+            skipLoad,
+            writable);
+    fileCacheWritable =
+        transformAsync(
+            fileCacheWritable,
+            result -> {
+              onDigests.accept(blobDigests.build());
+              return immediateFuture(null);
+            },
+            directExecutor());
+    removeDirectoryFutures.add(fileCacheWritable);
 
-    getInterruptiblyOrIOException(allAsList(removeDirectoryFutures.build()));
+    return transform(allAsList(removeDirectoryFutures.build()), results -> null, directExecutor());
   }
 
   @Override
-  public void stop() throws InterruptedException {
+  public void stop() throws IOException, InterruptedException {
     fileCache.stop();
     if (!shutdownAndAwaitTermination(fetchService, 1, MINUTES)) {
       log.log(Level.SEVERE, "could not terminate fetchService");
@@ -181,43 +194,43 @@ public class CFCExecFileSystem implements ExecFileSystem {
   }
 
   @SuppressWarnings("ConstantConditions")
-  private ListenableFuture<Void> put(Digest digest, Path path, boolean isExecutable) {
+  private ListenableFuture<PathResult> put(Digest digest, Path path, boolean isExecutable) {
     if (digest.getSize() == 0) {
       return listeningDecorator(fetchService)
           .submit(
               () -> {
                 Files.createFile(path);
                 // ignore executable
-                return null;
+                return new PathResult(path, false);
               });
     }
     String key = fileCache.getKey(digest, isExecutable);
     return transformAsync(
         fileCache.put(digest, isExecutable, fetchService),
-        (fileCachePath) -> {
+        pathResult -> {
           if (digest.getSize() != 0) {
             try {
-              Files.copy(fileCachePath, path);
+              Files.copy(pathResult.path(), path);
             } catch (IOException e) {
               return immediateFailedFuture(e);
             } finally {
               fileCache.decrementReference(key);
             }
           }
-          return immediateFuture(null);
+          return immediateFuture(pathResult);
         },
         fetchService);
   }
 
-  private ListenableFuture<Void> catchingPut(
+  private ListenableFuture<PathResult> catchingPut(
       Digest digest, Path root, Path path, boolean isExecutable) {
     return catching(
         put(digest, path, isExecutable),
         e -> new ViolationException(digest, root.relativize(path), isExecutable, e));
   }
 
-  protected ListenableFuture<Void> catching(
-      ListenableFuture<Void> future, Function<IOException, Throwable> onIOError) {
+  protected <V> ListenableFuture<V> catching(
+      ListenableFuture<? extends V> future, Function<IOException, Throwable> onIOError) {
     return catchingAsync(
         future,
         Throwable.class, // required per docs
@@ -257,6 +270,11 @@ public class CFCExecFileSystem implements ExecFileSystem {
   class ExecFileVisitor implements FileVisitor<Path> {
     protected final List<ListenableFuture<Void>> futures = new ArrayList<>();
     protected Path root = null;
+    protected final WorkerExecutedMetadata.Builder workerExecutedMetadata;
+
+    ExecFileVisitor(WorkerExecutedMetadata.Builder workerExecutedMetadata) {
+      this.workerExecutedMetadata = workerExecutedMetadata;
+    }
 
     Iterable<ListenableFuture<Void>> futures() {
       return futures;
@@ -278,6 +296,12 @@ public class CFCExecFileSystem implements ExecFileSystem {
       return FileVisitResult.CONTINUE;
     }
 
+    protected void fetchedBytes(long size) {
+      synchronized (workerExecutedMetadata) {
+        workerExecutedMetadata.setFetchedBytes(size + workerExecutedMetadata.getFetchedBytes());
+      }
+    }
+
     @Override
     public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
       ListenableFuture<Void> populate;
@@ -288,7 +312,16 @@ public class CFCExecFileSystem implements ExecFileSystem {
       } else if (attrs.isRegularFile()) {
         Digest digest = (Digest) attrs.fileKey();
         ExecFileAttributes fileAttrs = (ExecFileAttributes) attrs;
-        populate = catchingPut(digest, root, file, fileAttrs.isExecutable());
+        populate =
+            transform(
+                catchingPut(digest, root, file, fileAttrs.isExecutable()),
+                pathResult -> {
+                  if (pathResult.isMissed()) {
+                    fetchedBytes(digest.getSize());
+                  }
+                  return null;
+                },
+                directExecutor());
       } else {
         populate = immediateFailedFuture(new IOException("unknown file type for " + file));
         terminate = true;
@@ -310,7 +343,8 @@ public class CFCExecFileSystem implements ExecFileSystem {
       DigestFunction.Value digestFunction,
       Action action,
       Command command,
-      @Nullable UserPrincipal owner)
+      @Nullable UserPrincipal owner,
+      WorkerExecutedMetadata.Builder workerExecutedMetadata)
       throws IOException, InterruptedException {
     OutputDirectory outputDirectory = createOutputDirectory(command);
 
@@ -319,7 +353,7 @@ public class CFCExecFileSystem implements ExecFileSystem {
 
     log.log(Level.FINER, operationName + " walking execTree");
     ExecTree execTree = new ExecTree(directoriesIndex);
-    ExecFileVisitor visitor = new ExecFileVisitor();
+    ExecFileVisitor visitor = new ExecFileVisitor(workerExecutedMetadata);
     execTree.walk(
         execDir, DigestUtil.fromDigest(action.getInputRootDigest(), digestFunction), visitor);
 

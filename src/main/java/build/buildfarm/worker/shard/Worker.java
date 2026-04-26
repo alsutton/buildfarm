@@ -21,6 +21,7 @@ import static build.buildfarm.common.io.Utils.formatIOError;
 import static build.buildfarm.common.io.Utils.getUser;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.logging.Level.INFO;
@@ -56,9 +57,11 @@ import build.buildfarm.instance.Instance;
 import build.buildfarm.instance.shard.RedisShardBackplane;
 import build.buildfarm.instance.shard.RemoteInputStreamFactory;
 import build.buildfarm.instance.shard.WorkerStubs;
+import build.buildfarm.instance.shard.codec.ShardCodec;
 import build.buildfarm.instance.stub.StubInstance;
 import build.buildfarm.metrics.prometheus.PrometheusPublisher;
 import build.buildfarm.v1test.Digest;
+import build.buildfarm.v1test.PipelineChange;
 import build.buildfarm.v1test.ShardWorker;
 import build.buildfarm.worker.CFCExecFileSystem;
 import build.buildfarm.worker.CFCLinkExecFileSystem;
@@ -73,14 +76,20 @@ import build.buildfarm.worker.PipelineStage;
 import build.buildfarm.worker.PutOperationStage;
 import build.buildfarm.worker.ReportResultStage;
 import build.buildfarm.worker.SuperscalarPipelineStage;
+import build.buildfarm.worker.cgroup.Group;
 import build.buildfarm.worker.resources.LocalResourceSet;
 import build.buildfarm.worker.resources.LocalResourceSet.PoolResource;
 import build.buildfarm.worker.resources.LocalResourceSetUtils;
 import com.google.common.base.Strings;
 import com.google.common.cache.LoadingCache;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.common.util.concurrent.FutureCallback;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.longrunning.Operation;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.Duration;
@@ -90,11 +99,13 @@ import io.grpc.Status;
 import io.grpc.Status.Code;
 import io.grpc.health.v1.HealthCheckResponse.ServingStatus;
 import io.grpc.protobuf.services.HealthStatusManager;
-import io.grpc.protobuf.services.ProtoReflectionService;
+import io.grpc.protobuf.services.ProtoReflectionServiceV1;
+import io.grpc.services.ChannelzService;
 import io.prometheus.client.Counter;
 import io.prometheus.client.Gauge;
 import java.io.File;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -109,10 +120,11 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
 import javax.naming.ConfigurationException;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public final class Worker extends LoggingMain {
@@ -146,7 +158,6 @@ public final class Worker extends LoggingMain {
 
   private static BuildfarmConfigs configs = BuildfarmConfigs.getInstance();
 
-  private boolean inGracefulShutdown = false;
   private boolean isPaused = false;
 
   private WorkerInstance instance;
@@ -157,9 +168,13 @@ public final class Worker extends LoggingMain {
   private Path root;
   private ExecFileSystem execFileSystem;
   private Pipeline pipeline;
+  private PipelineStage matchStage;
+  private ShardWorkerContext context;
   private Backplane backplane;
   private LoadingCache<String, StubInstance> workerStubs;
   private AtomicBoolean released = new AtomicBoolean(true);
+  private AtomicBoolean shutdownInitiated = new AtomicBoolean(false);
+  private boolean startWritable = true;
 
   /**
    * The method will prepare the worker for graceful shutdown when the worker is ready. Note on
@@ -172,11 +187,10 @@ public final class Worker extends LoggingMain {
           "Graceful Shutdown is not enabled. Worker is shutting down without finishing executions"
               + " in progress.");
     } else {
-      inGracefulShutdown = true;
       log.info(
           "Graceful Shutdown - The current worker will not be registered again and should be"
               + " shutdown gracefully!");
-      pipeline.stopMatchingOperations();
+      context.prepareForGracefulShutdown();
       int scanRate = 30; // check every 30 seconds
       int timeWaited = 0;
       int timeOut = configs.getWorker().getGracefulShutdownSeconds();
@@ -230,51 +244,18 @@ public final class Worker extends LoggingMain {
 
   private Server createServer(
       ServerBuilder<?> serverBuilder,
-      @Nullable CASFileCache storage,
       Instance instance,
-      Pipeline pipeline,
-      ShardWorkerContext context) {
+      WorkerProfileService workerProfileService) {
     serverBuilder.addService(healthStatusManager.getHealthService());
     serverBuilder.addService(new ContentAddressableStorageService(instance));
     serverBuilder.addService(new ByteStreamService(instance));
-    serverBuilder.addService(new ShutDownWorkerGracefully(this));
-    serverBuilder.addService(ProtoReflectionService.newInstance());
-
-    // We will build a worker's server based on it's capabilities.
-    // A worker that is capable of execution will construct an execution pipeline.
-    // It will use various execution phases for it's profile service.
-    // On the other hand, a worker that is only capable of CAS storage does not need a pipeline.
-    if (configs.getWorker().getCapabilities().isExecution()) {
-      // all claims should be released upon pipeline completion, but it is safe to ensure that
-      // they are whether empty or not, so do so.
-      PutOperationStage completeStage =
-          new ReleaseClaimStage(operation -> context.deactivate(operation.getName()));
-      PipelineStage errorStage = completeStage; /* new ErrorStage(); */
-      SuperscalarPipelineStage reportResultStage =
-          new ReportResultStage(context, completeStage, errorStage);
-      SuperscalarPipelineStage executeActionStage =
-          new ExecuteActionStage(context, reportResultStage, errorStage);
-      PipelineStage releaseClaimAndRequeueStage = new ReleaseClaimStage(context::requeue);
-      SuperscalarPipelineStage inputFetchStage =
-          new InputFetchStage(context, executeActionStage, releaseClaimAndRequeueStage);
-      PipelineStage matchStage =
-          new MatchStage(context, inputFetchStage, releaseClaimAndRequeueStage);
-
-      pipeline.add(matchStage, 4);
-      pipeline.add(inputFetchStage, 3);
-      pipeline.add(executeActionStage, 2);
-      pipeline.add(reportResultStage, 1);
-
-      serverBuilder.addService(
-          new WorkerProfileService(
-              storage,
-              matchStage,
-              inputFetchStage,
-              executeActionStage,
-              reportResultStage,
-              completeStage,
-              backplane));
+    serverBuilder.addService(new WorkerControl(this));
+    serverBuilder.addService(ProtoReflectionServiceV1.newInstance());
+    if (configs.getWorker().isGrpcChannelz()) {
+      serverBuilder.addService(ChannelzService.newInstance(/* maxPageSize= */ 100));
     }
+    serverBuilder.addService(workerProfileService);
+
     GrpcMetrics.handleGrpcMetricIntercepts(serverBuilder, configs.getWorker().getGrpcMetrics());
     serverBuilder.intercept(new ServerHeadersInterceptor(meta -> {}));
     if (configs.getServer().getMaxInboundMessageSizeBytes() != 0) {
@@ -388,7 +369,7 @@ public final class Worker extends LoggingMain {
     }
   }
 
-  private ContentAddressableStorage createStorages(
+  private CASFileCache createStorages(
       InputStreamFactory remoteInputStreamFactory,
       ExecutorService removeDirectoryService,
       Executor accessRecorder,
@@ -411,7 +392,7 @@ public final class Worker extends LoggingMain {
       delegate = storage;
       delegateSkipLoad = cas.isSkipLoad();
     }
-    return storage;
+    return (CASFileCache) storage;
   }
 
   private ContentAddressableStorage createStorage(
@@ -563,7 +544,9 @@ public final class Worker extends LoggingMain {
   private void addBlobsLocation(List<Digest> digests, String name) {
     while (!backplane.isStopped()) {
       try {
-        backplane.addBlobsLocation(digests, name);
+        if (configs.getWorker().getCapabilities().isCas()) {
+          backplane.addBlobsLocation(digests, name);
+        }
         return;
       } catch (IOException e) {
         Status status = Status.fromThrowable(e);
@@ -590,7 +573,7 @@ public final class Worker extends LoggingMain {
     throw Status.UNAVAILABLE.withDescription("backplane was stopped").asRuntimeException();
   }
 
-  private void startFailsafeRegistration() {
+  private void startFailsafeRegistration(Supplier<Boolean> isReadOnly) {
     String endpoint = configs.getWorker().getPublicName();
     ShardWorker.Builder worker = ShardWorker.newBuilder().setEndpoint(endpoint);
     worker.setWorkerType(configs.getWorker().getWorkerType());
@@ -602,7 +585,10 @@ public final class Worker extends LoggingMain {
               long workerRegistrationExpiresAt = 0;
 
               ShardWorker nextRegistration(long now) {
-                return worker.setExpireAt(now + registrationOffsetMillis).build();
+                return worker
+                    .setExpireAt(now + registrationOffsetMillis)
+                    .setReadOnly(isReadOnly.get())
+                    .build();
               }
 
               long nextInterval(long now) {
@@ -615,7 +601,7 @@ public final class Worker extends LoggingMain {
                   if (pausedFile.exists() && !isPaused) {
                     isPaused = true;
                     log.log(Level.INFO, "The current worker is paused from taking on new work!");
-                    pipeline.stopMatchingOperations();
+                    context.prepareForGracefulShutdown();
                     workerPausedMetric.inc();
                   }
                 } catch (Exception e) {
@@ -627,7 +613,7 @@ public final class Worker extends LoggingMain {
               void registerIfExpired() {
                 long now = System.currentTimeMillis();
                 if (now >= workerRegistrationExpiresAt
-                    && !inGracefulShutdown
+                    && !context.inGracefulShutdown()
                     && !isWorkerPausedFromNewWork()) {
                   // worker must be registered to match
                   addWorker(nextRegistration(now));
@@ -683,7 +669,8 @@ public final class Worker extends LoggingMain {
               identifier,
               /* subscribeToBackplane= */ true,
               /* runFailsafeOperation= */ false,
-              this::stripOperation);
+              this::stripOperation,
+              ShardCodec.DEFAULT_CODEC);
       backplane.start(configs.getWorker().getPublicName(), workerStubs::invalidate);
     } else {
       throw new IllegalArgumentException("Shard Backplane not set in config");
@@ -725,7 +712,7 @@ public final class Worker extends LoggingMain {
             new Random(),
             workerStubs,
             (worker, t, context) -> {});
-    ContentAddressableStorage storage =
+    CASFileCache storage =
         createStorages(
             remoteInputStreamFactory,
             removeDirectoryService,
@@ -755,9 +742,13 @@ public final class Worker extends LoggingMain {
       writer = new LocalCasWriter(execFileSystem);
     }
 
-    ShardWorkerContext context =
+    String endpointName = configs.getWorker().getPublicName();
+    String hostName = InetAddress.getLocalHost().getHostName();
+
+    context =
         new ShardWorkerContext(
-            configs.getWorker().getPublicName(),
+            endpointName,
+            ImmutableList.of(endpointName, hostName, identifier),
             Duration.newBuilder().setSeconds(configs.getWorker().getOperationPollPeriod()).build(),
             backplane::pollExecution,
             inputFetchStageWidth,
@@ -783,27 +774,76 @@ public final class Worker extends LoggingMain {
             writer);
 
     pipeline = new Pipeline();
-    server = createServer(serverBuilder, (CASFileCache) storage, instance, pipeline, context);
+    SuperscalarPipelineStage inputFetchStage = null;
+    SuperscalarPipelineStage executeActionStage = null;
+    SuperscalarPipelineStage reportResultStage = null;
+    PutOperationStage completeStage = null;
+    if (configs.getWorker().getCapabilities().isExecution()) {
+      // all claims should be released upon pipeline completion, but it is safe to ensure that
+      // they are whether empty or not, so do so.
+      completeStage = new ReleaseClaimStage(operation -> context.deactivate(operation.getName()));
+      PipelineStage errorStage = completeStage; /* new ErrorStage(); */
+      reportResultStage = new ReportResultStage(context, completeStage, errorStage);
+      executeActionStage = new ExecuteActionStage(context, reportResultStage, errorStage);
+      // FIXME this implies and requires that context::requeue performs the context::deactivate
+      // function
+      PipelineStage releaseClaimAndRequeueStage = new ReleaseClaimStage(context::requeue);
+      inputFetchStage =
+          new InputFetchStage(context, executeActionStage, releaseClaimAndRequeueStage);
+      matchStage = new MatchStage(context, inputFetchStage, releaseClaimAndRequeueStage);
+
+      pipeline.add(matchStage, 4);
+      pipeline.add(inputFetchStage, 3);
+      pipeline.add(executeActionStage, 2);
+      pipeline.add(reportResultStage, 1);
+    }
+
+    WorkerProfileService workerProfileService =
+        new WorkerProfileService(
+            endpointName,
+            configs.getWorker().getPublicName(),
+            storage,
+            matchStage,
+            inputFetchStage,
+            executeActionStage,
+            reportResultStage,
+            completeStage);
+    server = createServer(serverBuilder, instance, workerProfileService);
 
     removeWorker(configs.getWorker().getPublicName());
 
     boolean skipLoad = configs.getWorker().getStorages().getFirst().isSkipLoad();
-    execFileSystem.start(
-        (digests) -> addBlobsLocation(digests, configs.getWorker().getPublicName()), skipLoad);
+    ListenableFuture<Void> fileSystemStarted =
+        execFileSystem.start(
+            (digests) -> addBlobsLocation(digests, configs.getWorker().getPublicName()),
+            skipLoad,
+            startWritable);
 
     server.start();
-    healthStatusManager.setStatus(
-        HealthStatusManager.SERVICE_NAME_ALL_SERVICES, ServingStatus.SERVING);
-    PrometheusPublisher.startHttpServer(configs.getPrometheusPort());
-    startFailsafeRegistration();
+    Futures.addCallback(
+        fileSystemStarted,
+        new FutureCallback<>() {
+          @Override
+          public void onSuccess(Void result) {
+            log.log(INFO, String.format("%s initialized", identifier));
+            healthStatusManager.setStatus(
+                HealthStatusManager.SERVICE_NAME_ALL_SERVICES, ServingStatus.SERVING);
+            PrometheusPublisher.startHttpServer(configs.getPrometheusPort());
+          }
+
+          @Override
+          public void onFailure(Throwable t) {
+            log.log(SEVERE, "execFileSystem start failure", t);
+          }
+        },
+        directExecutor());
+    startFailsafeRegistration(storage::isReadOnly);
 
     pipeline.start();
     healthCheckMetric.labels("start").inc();
     inputFetchSlotsTotal.set(inputFetchStageWidth);
     executionSlotsTotal.set(executeStageWidth);
     reportResultSlotsTotal.set(reportResultStageWidth);
-
-    log.log(INFO, String.format("%s initialized", identifier));
   }
 
   @Override
@@ -814,16 +854,62 @@ public final class Worker extends LoggingMain {
 
   private void awaitTermination() throws InterruptedException {
     pipeline.join();
-    server.awaitTermination();
+    pipeline = null;
+    if (configs.getWorker().getCapabilities().isExecution()) {
+      initiateShutdown();
+    }
+    if (server != null && !server.isTerminated()) {
+      int retries = 5;
+      while (retries > 0) {
+        if (shutdownInitiated.get()) {
+          server.shutdown();
+          retries--;
+        }
+        if (server.awaitTermination(shutdownWaitTimeInSeconds, SECONDS)) {
+          retries = 1;
+          break;
+        }
+      }
+      if (retries == 0) {
+        server.shutdownNow();
+        server.awaitTermination();
+      }
+    }
+  }
+
+  public Iterable<PipelineChange> pipelineChange(Iterable<PipelineChange> changes) {
+    for (PipelineChange change : changes) {
+      for (PipelineStage stage : pipeline) {
+        if (change.getStage().equals(stage.getName())) {
+          stage.setPaused(change.getPaused());
+          if (change.getWidth() > 0) {
+            stage.setWidth(change.getWidth());
+          }
+        }
+      }
+    }
+
+    return Iterables.transform(
+        pipeline,
+        stage ->
+            PipelineChange.newBuilder()
+                .setStage(stage.getName())
+                .setPaused(stage.isPaused())
+                .setWidth(stage.getWidth())
+                .build());
   }
 
   public void initiateShutdown() {
+    if (context != null) {
+      context.prepareForGracefulShutdown();
+    }
     if (pipeline != null) {
-      pipeline.stopMatchingOperations();
+      pipeline.interrupt(matchStage);
     }
     if (server != null) {
       server.shutdown();
     }
+    shutdownInitiated.set(true);
   }
 
   private synchronized void awaitRelease() throws InterruptedException {
@@ -844,6 +930,8 @@ public final class Worker extends LoggingMain {
   private void shutdown() throws InterruptedException {
     log.info("*** shutting down gRPC server since JVM is shutting down");
     prepareWorkerForGracefulShutdown();
+    // Clean-up any cgroups that were possibly created/mutated.
+    Group.onShutdown();
     PrometheusPublisher.stopHttpServer();
     boolean interrupted = Thread.interrupted();
     if (pipeline != null) {
@@ -862,7 +950,11 @@ public final class Worker extends LoggingMain {
     inputFetchSlotsTotal.set(0);
     if (execFileSystem != null) {
       log.info("Stopping exec filesystem");
-      execFileSystem.stop();
+      try {
+        execFileSystem.stop();
+      } catch (IOException e) {
+        log.log(SEVERE, "error shutting down exec filesystem", e);
+      }
       execFileSystem = null;
     }
     if (server != null) {

@@ -27,6 +27,7 @@ import build.buildfarm.common.Write;
 import build.buildfarm.common.config.ExecutionPolicy;
 import build.buildfarm.v1test.QueueEntry;
 import build.buildfarm.v1test.QueuedOperation;
+import build.buildfarm.v1test.WorkerExecutedMetadata;
 import build.buildfarm.worker.resources.ResourceLimits;
 import com.google.common.collect.ImmutableList;
 import com.google.longrunning.Operation;
@@ -39,7 +40,7 @@ import java.nio.file.attribute.UserPrincipal;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executor;
-import javax.annotation.Nullable;
+import org.jspecify.annotations.Nullable;
 
 public interface WorkerContext {
   interface IOResource extends AutoCloseable {
@@ -64,6 +65,10 @@ public interface WorkerContext {
       Runnable onFailure,
       Deadline deadline,
       Executor executor);
+
+  boolean inGracefulShutdown();
+
+  void prepareForGracefulShutdown();
 
   void match(MatchListener listener) throws InterruptedException;
 
@@ -98,7 +103,8 @@ public interface WorkerContext {
       DigestFunction.Value digestFunction,
       Action action,
       Command command,
-      @Nullable UserPrincipal owner)
+      @Nullable UserPrincipal owner,
+      WorkerExecutedMetadata.Builder workerExecutedMetadata)
       throws IOException, InterruptedException;
 
   void destroyExecDir(Path execDir) throws IOException, InterruptedException;
@@ -114,7 +120,7 @@ public interface WorkerContext {
 
   boolean putOperation(Operation operation) throws IOException, InterruptedException;
 
-  void blacklistAction(String actionId) throws IOException, InterruptedException;
+  void blocklistAction(String actionId) throws IOException, InterruptedException;
 
   void putActionResult(ActionKey actionKey, ActionResult actionResult)
       throws IOException, InterruptedException;

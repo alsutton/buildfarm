@@ -23,6 +23,11 @@ public class Server {
   private GrpcMetrics grpcMetrics = new GrpcMetrics();
   private int casWriteTimeout = 3600;
   private int bytestreamTimeout = 3600;
+  private int casReadTimeout = 60;
+  private int expectTimeout = 60;
+  private int cacheCheckTimeout = 60;
+  private int queueTimeout = 60;
+  private int requeueTimeout = 60;
   private String sslCertificatePath = null;
   private String sslPrivateKeyPath = null;
   private boolean runDispatchedMonitor = true;
@@ -31,7 +36,7 @@ public class Server {
   private boolean runOperationQueuer = true;
   private boolean ensureOutputsPresent = true;
   private boolean mergeExecutions = true;
-  private int maxRequeueAttempts = 5;
+  private int maxRequeueAttempts = 3;
   private boolean useDenyList = true;
   private long grpcTimeout = 3600;
   private long executeKeepaliveAfterSeconds = 60;
@@ -46,6 +51,7 @@ public class Server {
   private int maxInboundMetadataSize = 0;
   private ServerCacheConfigs caches = new ServerCacheConfigs();
   private boolean findMissingBlobsViaBackplane = false;
+  private boolean grpcChannelz = false;
   private int gracefulShutdownSeconds = 0;
   private Set<String> correlatedInvocationsIndexScopes = ImmutableSet.of("host", "username");
 

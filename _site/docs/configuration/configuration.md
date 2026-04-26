@@ -21,6 +21,14 @@ worker:
   publicName: "localhost:8981"
 ```
 
+Configuration files also support includes via !include tag:
+
+```yaml
+backplane: !include "backplane.yml"
+server: !include "server.yml"
+worker: !include "worker.yml"
+```
+
 The configuration can be provided to the server and worker as a CLI argument or through the environment variable `CONFIG_PATH`
 For an example configuration containing all of the configuration values, see `examples/config.yml`.
 
@@ -59,6 +67,7 @@ worker:
 | publicName                       | String, _DERIVED:port_        | INSTANCE_NAME   | Host:port of the GRPC server, required to be accessible by all servers                                                                   |
 | actionCacheReadOnly              | boolean, _false_              |                 | Allow/Deny writing to action cache                                                                                                       |
 | port                             | Integer, _8980_               |                 | Listening port of the GRPC server                                                                                                        |
+| grpcChannelz                     | boolean, _false_              |                 | Enable gRPC Channelz service for runtime channel diagnostics                                                                             |
 | bindAddress                      | String                        |                 | Listening address of the GRPC server, default for Java Grpc (all interface addresses) if unspecified                                     |
 | maxInboundMessageSizeBytes       | Integer, _0_                  |                 | Byte size limit of GRPC messages, default for Java Grpc if unspecified or 0                                                              |
 | maxInboundMetadataSize           | Integer, _0_                  |                 | Byte size limit of GRPC metadata, default for Java Grpc if unspecified or 0                                                              |
@@ -214,10 +223,10 @@ server:
 | workersHashName                    | String, _Workers_                        |                 |                       | Redis key used to store a hash of registered workers                                                                                                                                         |
 | workerChannel                      | String, _WorkerChannel_                  |                 |                       | Redis pubsub channel key where changes of the cluster membership are announced                                                                                                               |
 | actionCachePrefix                  | String, _ActionCache_                    |                 |                       | Redis key prefix for all ActionCache entries                                                                                                                                                 |
-| actionCacheExpire                  | Integer, _2419200_                       |                 |                       | The TTL maintained for ActionCache entries, not refreshed on getActionResult hit                                                                                                             |
-| actionBlacklistPrefix              | String, _ActionBlacklist_                |                 |                       | Redis key prefix for all blacklisted actions, which are rejected                                                                                                                             |
-| actionBlacklistExpire              | Integer, _3600_                          |                 |                       | The TTL maintained for action blacklist entries                                                                                                                                              |
-| invocationBlacklistPrefix          | String, _InvocationBlacklist_            |                 |                       | Redis key prefix for blacklisted invocations, suffixed with a a tool invocation ID                                                                                                           |
+| actionCacheExpire                  | Integer, _2419200_                       |                 |                       | The TTL maintained for ActionCache entries, refreshed on getActionResult hit                                                                                                             |
+| actionBlocklistPrefix              | String, _ActionBlocklist_                |                 |                       | Redis key prefix for all blocklisted actions, which are rejected                                                                                                                             |
+| actionBlocklistExpire              | Integer, _3600_                          |                 |                       | The TTL maintained for action blocklist entries                                                                                                                                              |
+| invocationBlocklistPrefix          | String, _InvocationBlocklist_            |                 |                       | Redis key prefix for blocklisted invocations, suffixed with a a tool invocation ID                                                                                                           |
 | operationPrefix                    | String, _Operation_                      |                 |                       | Redis key prefix for all operations, suffixed with the operation's name                                                                                                                      |
 | operationExpire                    | Integer, _604800_                        |                 |                       | The TTL maintained for all executions, updated on each modification                                                                                                                          |
 | actionExecutionExpire              | Integer, _21600_                         |                 |                       | The TTL maintained for all action -> execution mappings for mergeExecutions                                                                                                                  |
@@ -231,7 +240,7 @@ server:
 | dispatchedOperationsHashName       | String, _DispatchedOperations_           |                 |                       | Redis key of a hash of operation names to the worker lease for its execution, which are monitored by the dispatched monitor                                                                  |
 | operationChannelPrefix             | String, _OperationChannel_               |                 |                       | Redis pubsub channel prefix suffixed by an operation name                                                                                                                                    |
 | casPrefix                          | String, _ContentAddressableStorage_      |                 |                       | Redis key prefix suffixed with a blob digest that maps to a set of workers with that blob's availability                                                                                     |
-| casExpire                          | Integer, _604800_                        |                 |                       | The TTL maintained for CAS entries, which is not refreshed on any read access of the blob                                                                                                    |
+| casExpire                          | Integer, _604800_                        |                 |                       | The TTL maintained for CAS entries, which is refreshed on any read access of the blob                                                                                                    |
 | subscribeToBackplane               | boolean, _true_                          |                 |                       | Enable an agent of the backplane client which subscribes to worker channel and operation channel events. If disabled, responsiveness of watchers and CAS are reduced                         |
 | runFailsafeOperation               | boolean, _true_                          |                 |                       | Enable an agent in the backplane client which monitors watched operations and ensures they are in a known maintained, or expirable state                                                     |
 | maxQueueDepth                      | Integer, _100000_                        |                 |                       | Maximum length that the ready to run queue is allowed to reach to control an arrival flow for execution                                                                                      |
@@ -240,6 +249,7 @@ server:
 | timeout                            | Integer, _10000_                         |                 |                       | Default timeout                                                                                                                                                                              |
 | maxInvocationIdTimeout             | Integer, _604800_                        |                 |                       | Maximum TTL (Time-to-Live in second) of invocationId keys in RedisBackplane                                                                                                                  |
 | maxAttempts                        | Integer, _20_                            |                 |                       | Maximum number of execution attempts                                                                                                                                                         |
+| connectionValidatedOnBorrow        | boolean, _false_                         |                 |                       | Whether to validate Redis connections when borrowing from the pool                                                                                                                                                         |
 
 
 Example:
@@ -280,6 +290,7 @@ backplane:
 | Configuration                     | Accepted and _Default_ Values | Environment Var       | Description                                                                                                                                                                                                                                                                                                              |
 |-----------------------------------|-------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | port                              | Integer, _8981_               |                       | Listening port of the worker                                                                                                                                                                                                                                                                                             |
+| grpcChannelz                      | boolean, _false_              |                       | Enable gRPC Channelz service for runtime channel diagnostics                                                                                                                                                                                                                                                             |
 | publicName                        | String, _DERIVED:port_        | INSTANCE_NAME         | Host:port of the GRPC server, required to be accessible by all servers                                                                                                                                                                                                                                                   |
 | root                              | String, _/tmp/worker_         |                       | Path for all operation content storage                                                                                                                                                                                                                                                                                   |
 | inlineContentLimit                | Integer, _1048567_            |                       | Total size in bytes of inline content for action results, output files, stdout, stderr content                                                                                                                                                                                                                           |
@@ -288,6 +299,7 @@ backplane:
 | executeStageWidthOffset           | Integer, _0_                  |                       | Offset number of CPU cores available for execution (to allow for use by other processes)                                                                                                                                                                                                                                 |
 | inputFetchStageWidth              | Integer, _0_                  |                       | Number of concurrently available slots to fetch inputs (0 = system calculated based on CPU cores)                                                                                                                                                                                                                        |
 | inputFetchDeadline                | Integer, _60_                 |                       | Limit on time (seconds) for input fetch stage to fetch inputs                                                                                                                                                                                                                                                            |
+| reportResultStageWidth            | Integer, _1_                  |                       | Number of concurrently available slots to write results and clean up execution directories                                                                                                                                                                                                                               |
 | linkExecFileSystem                | boolean, _true_               |                       | Use hard links instead of file copies to populate execution directories. Disable on Windows to compensate for shared hard-link deletion semantics for running executables.                                                                                                                                               |
 | linkInputDirectories              | boolean, _true_               |                       | Use an input directory creation strategy which creates a single directory tree at the highest level containing no output paths of any kind, and symlinks that directory into an action's execroot, saving large amounts of time spent manufacturing the same read-only input hierirchy over multiple actions' executions |
 | execOwner                         | String, _null_                |                       | Create exec trees containing directories that are owned by this user                                                                                                                                                                                                                                                     |
@@ -298,8 +310,8 @@ backplane:
 | onlyMulticoreTests                | boolean, _false_              |                       | Only permit tests to exceed the default coresvalue for their min/max-cores range specification (only works with non-zero defaultMaxCores)                                                                                                                                                                                |
 | allowBringYourOwnContainer        | boolean, _false_              |                       | Enable execution in a custom Docker container                                                                                                                                                                                                                                                                            |
 | errorOperationRemainingResources  | boolean, _false_              |                       |                                                                                                                                                                                                                                                                                                                          |
-| errorOperationOutputSizeExceeded  | boolean, _false_              |                       | Operations which produce single output files which exceed maxEntrySizeBytes will fail with a violation type which implies a user error. When disabled, the violation will indicate a transient error, with the action blacklisted.                                                                                       |
-| realInputDirectories              | List of Strings, _external_   |                       | A list of paths that will not be subject to the effects of linkInputDirectories setting, may also be used to provide writable directories as input roots for actions which expect to be able to write to an input location and will fail if they cannot                                                                  |
+| errorOperationOutputSizeExceeded  | boolean, _false_              |                       | Operations which produce single output files which exceed maxEntrySizeBytes will fail with a violation type which implies a user error. When disabled, the violation will indicate a transient error, with the action blocklisted.                                                                                       |
+| linkedInputDirectories            | List of Strings, _^(?!external$).*$_ |                       | A list of regular expressions matching input directories which will be subject to the effects of linkInputDirectories setting |
 | gracefulShutdownSeconds           | Integer, 0                    |                       | Time in seconds to allow for operations in flight to finish when shutdown signal is received                                                                                                                                                                                                                             |
 | createSymlinkOutputs              | boolean, _false_              |                       | Creates SymlinkNodes for symbolic links discovered in output paths for actions. No verification of the symlink target path occurs. Buildstream, for example, requires this.                                                                                                                                              |
 | zstdBufferPoolSize                | Integer, _2048_               |                       | Specifies the maximum number of zstd data buffers that may be in use concurrently by the filesystem CAS. Increase to improve compressed blob throughput, decrease to reduce memory usage.                                                                                                                                |
@@ -309,8 +321,8 @@ backplane:
 worker:
   port: 8981
   publicName: "localhost:8981"
-  realInputDirectories:
-    - "external"
+  linkedInputDirectories:
+    - "^path/to/common/directory"
 ```
 
 ### Capabilities
@@ -330,14 +342,18 @@ worker:
 ```
 
 ### Sandbox Settings
+Using the sandbox can be configurable by the client via `exec_properties`. However, sometimes it is preferred to enable it via buildfarm config to prevent users from running actions outside the sandbox.
 
-| Configuration | Accepted and _Default_ Values | Description                                          |
-|---------------|-------------------------------|------------------------------------------------------|
-| alwaysUseSandbox      | boolean, _false_      | Enforce that the sandbox be used on every acion.     |
-| alwaysUseCgroups      | boolean, _true_       | Enforce that actions run under cgroups.              |
-| alwaysUseTmpFs        | boolean, _false_      | Enforce that the sandbox uses tmpfs on every acion.  |
-| selectForBlockNetwork | boolean, _false_      | `block-network` enables sandbox action execution.    |
-| selectForTmpFs        | boolean, _false_      | `tmpfs` enables sandbox action execution.            |
+| Configuration         | Accepted and _Default_ Values | Description                                                                                                                                                                                                     |
+|-----------------------|-------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| alwaysUseSandbox      | boolean, _false_              | Whether or not to always use the sandbox when running actions. It may be preferred to enforce sandbox usage than rely on client selection.                                                                      |
+| alwaysUseAsNobody     | boolean, _false_              | Whether or not to always use the as-nobody wrapper when running actions. It may be preferred to enforce this wrapper instead of relying on client selection.                                                    |
+| alwaysUseCgroups      | boolean, _true_               | Whether or not to use cgroups when sandboxing actions.  It may be preferred to enforce cgroup usage.                                                                                                            |
+| alwaysUseTmpFs        | boolean, _false_              | Whether or not to always use tmpfs when using the sandbox. It may be preferred to enforce sandbox usage than rely on client selection.                                                                          |
+| additionalWritePaths  | List of Strings, _[]_         | Additional paths the sandbox is allowed to write to. Suggestions may include: /tmp, /dev/shm                                                                                                                    |
+| tmpFsPaths            | List of Strings, _[]_         | Additional paths the sandbox uses for tmpfs. Suggestions may include: /tmp                                                                                                                                      |
+| selectForBlockNetwork | boolean, _false_              | If the action requires "block network" use the sandbox to fulfill this request. Otherwise, there may be no alternative solution and the "block network" request will be ignored / implemented differently.      |
+| selectForTmpFs        | boolean, _false_              | If the action requires "tmpfs" use the sandbox to fulfill this request.execution. Otherwise, there may be no alternative solution and the "tmpfs" request will be ignored / implemented differently.            |
 
 Example:
 
@@ -345,8 +361,11 @@ Example:
 worker:
   sandboxSettings:
     alwaysUseSandbox: true
+    alwaysUseAsNobody: false
     alwaysUseCgroups: true
     alwaysUseTmpFs: true
+    additionalWritePaths: []
+    tmpFsPaths: []
     selectForBlockNetwork: false
     selectForTmpFs: false
 ```
@@ -443,6 +462,7 @@ worker:
 | Configuration    | Accepted and _Default_ Values                              | Description                                                         |
 |------------------|------------------------------------------------------------|---------------------------------------------------------------------|
 | name             | String                                                     | Execution policy name                                               |
+| prioritized      | Boolean, _false_                                           | If true, policy will run before built-in policies                   |
 | executionWrapper | Execution wrapper, containing a path and list of arguments | Execution wrapper, its path and a list of arguments for the wrapper |
 
 Example:
@@ -450,15 +470,40 @@ Example:
 ```yaml
 worker:
   executionPolicies:
+    - name: as-nobody
+      prioritized: true
+      executionWrapper:
+        path: /app/build_buildfarm/as-nobody
+        arguments:
+          - "-u"
+          - "<exec-owner>"
+    - name: unshare
+      executionWrapper:
+        path: /usr/bin/unshare
+        arguments:
+          - "-n"
+          - "-r"
+    - name: linux-sandbox
+      executionWrapper:
+        path: /app/build_buildfarm/linux-sandbox
+        arguments:
+          # use "--" to signal the end of linux-sandbox args. "--" should always be last!
+          - "--"
     - name: test
       executionWrapper:
-        path: /
+        path: /YOUR/WRAPPER
         arguments:
           - arg1
           - arg2
           - "<platform-property-name>"
 ```
 
-_arg1_ and _arg2_ are interpreted literally. _<platform-property-value>_ will be substituted with the value of a property named `"platform-property-name"` from a Command's Platform _or_ the requested pool resources for the execution. If a matching property or pool resource is not found for a specified name, the entire wrapper will be discarded and have no effect on the execution.
+`arg1` and `arg2` are interpreted literally. `<platform-property-value>` will be substituted with the value of a property named `"platform-property-name"` from a Command's Platform _or_ the requested pool resources for the execution. If a matching property or pool resource is not found for a specified name, the entire wrapper will be discarded and have no effect on the execution.
 
-_<exec-owner>_ is an automatically provided pool resource when `execOwner` or `execOwners` is specified, and will contain the value of the execution's owner selected for exec tree creation.
+`<exec-owner>` is an automatically provided pool resource when `execOwner` or `execOwners` is specified, and will contain the value of the execution's owner selected for exec tree creation.
+
+An execution with `as-nobody`, `unshare`, and `linux-sandbox` execution policies enabled would produce a command line like:
+```sh
+/app/build_buildfarm/as-nobody -u <exec-owner> /usr/bin/unshare -n -r /app/build_buildfarm/linux-sandbox -- /YOUR/WRAPPER arg1 arg2 <platform-property-name> ACTION
+```
+where ACTION is the Command from remote execution action.

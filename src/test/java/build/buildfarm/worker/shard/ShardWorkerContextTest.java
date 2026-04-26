@@ -20,7 +20,6 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -103,7 +102,8 @@ public class ShardWorkerContextTest {
   WorkerContext createTestContext(
       Iterable<ExecutionPolicy> policies, LocalResourceSet resourceSet) {
     return new ShardWorkerContext(
-        "test",
+        "testWorker",
+        ImmutableList.of("test"),
         /* operationPollPeriod= */ Duration.getDefaultInstance(),
         /* operationPoller= */ (queueEntry, stage, requeueAt) -> false,
         /* inlineContentLimit= */
@@ -143,16 +143,22 @@ public class ShardWorkerContextTest {
     when(backplane.dispatchOperation(any(List.class), any(LocalResourceSet.class)))
         .thenReturn(queueEntry)
         .thenReturn(null); // provide a match completion in failure case
+    ContentAddressableStorage storage = mock(ContentAddressableStorage.class);
+    when(execFileSystem.getStorage()).thenReturn(storage);
+
     MatchListener listener = mock(MatchListener.class);
     when(listener.onWaitStart()).thenReturn(true);
     context.match(listener);
+
+    // one readonly check for each iteration
+    verify(storage, times(2)).isReadOnly();
+    verifyNoMoreInteractions(storage);
     verify(listener, times(1)).onEntry(eq(queueEntry), any(Claim.class));
     verify(listener, times(1)).onWaitStart();
   }
 
   @Test
   public void dequeueMatchSettingsPlatformRejectsInvalidQueueEntry() throws Exception {
-    configs.getWorker().getDequeueMatchSettings().setAcceptEverything(false);
     configs.getWorker().getDequeueMatchSettings().setAllowUnmatched(false);
     WorkerContext context = createTestContext();
     Platform matchPlatform =
@@ -163,14 +169,22 @@ public class ShardWorkerContextTest {
     when(backplane.dispatchOperation(any(List.class), any(LocalResourceSet.class)))
         .thenReturn(queueEntry)
         .thenReturn(null); // provide a match completion in failure case
+    ContentAddressableStorage storage = mock(ContentAddressableStorage.class);
+    when(execFileSystem.getStorage()).thenReturn(storage);
+
     MatchListener listener = mock(MatchListener.class);
     context.match(listener);
-    verify(listener, never()).onEntry(eq(queueEntry), any(Claim.class));
+
+    // one readonly check for each iteration
+    verify(storage, times(2)).isReadOnly();
+    verifyNoMoreInteractions(storage);
+    verify(listener, times(1)).onWaitStart();
+    verify(listener, times(1)).onEntry(null, null);
+    verifyNoMoreInteractions(listener);
   }
 
   @Test
   public void dequeueMatchSettingsPlatformAcceptsValidQueueEntry() throws Exception {
-    configs.getWorker().getDequeueMatchSettings().setAcceptEverything(false);
     configs.getWorker().getDequeueMatchSettings().setAllowUnmatched(false);
     Platform testOSPlatform =
         Platform.newBuilder()
@@ -182,9 +196,15 @@ public class ShardWorkerContextTest {
     when(backplane.dispatchOperation(any(List.class), any(LocalResourceSet.class)))
         .thenReturn(queueEntry)
         .thenReturn(null); // provide a match completion in failure case
+    ContentAddressableStorage storage = mock(ContentAddressableStorage.class);
+    when(execFileSystem.getStorage()).thenReturn(storage);
     MatchListener listener = mock(MatchListener.class);
     when(listener.onWaitStart()).thenReturn(true);
     context.match(listener);
+
+    // one readonly check for each iteration
+    verify(storage, times(2)).isReadOnly();
+    verifyNoMoreInteractions(storage);
     verify(listener, times(1)).onEntry(eq(queueEntry), any(Claim.class));
     verify(listener, times(1)).onWaitStart();
   }
@@ -225,10 +245,16 @@ public class ShardWorkerContextTest {
     when(backplane.dispatchOperation(any(List.class), any(LocalResourceSet.class)))
         .thenReturn(queueEntry)
         .thenReturn(null); // provide a match completion in failure case
-    MatchListener listener = mock(MatchListener.class);
+    ContentAddressableStorage storage = mock(ContentAddressableStorage.class);
+    when(execFileSystem.getStorage()).thenReturn(storage);
 
+    MatchListener listener = mock(MatchListener.class);
     when(listener.onWaitStart()).thenReturn(true);
     context.match(listener);
+
+    // one readonly check for each iteration, 3 here
+    verify(storage, times(3)).isReadOnly();
+    verifyNoMoreInteractions(storage);
     verify(listener, times(1)).onEntry(null, null);
     // twice because there were 2 dequeues to complete queueEntry
     verify(listener, times(2)).onWaitStart();

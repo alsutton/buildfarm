@@ -22,8 +22,8 @@ import build.buildfarm.worker.resources.LocalResourceSet;
 import build.buildfarm.worker.resources.LocalResourceSetUtils;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.SetMultimap;
-import javax.annotation.Nullable;
 import org.jetbrains.annotations.NotNull;
+import org.jspecify.annotations.Nullable;
 
 /**
  * @class DequeueMatchEvaluator
@@ -49,14 +49,11 @@ public class DequeueMatchEvaluator {
    * @details Compares the platform properties of the worker to the operation's platform properties.
    * @param workerProvisions The provisions of the worker.
    * @param resourceSet The limited resources that the worker has available.
-   * @param queueEntry An entry recently removed from the queue.
    * @return An acquired claim on resources, or null if the platform could not be satisfied or
    *     resourced.
    * @note Overloaded.
    * @note Suggested return identifier: claim.
    */
-  @SuppressWarnings("NullableProblems")
-  @NotNull
   public static @Nullable Claim acquireClaim(
       SetMultimap<String, String> workerProvisions,
       LocalResourceSet resourceSet,

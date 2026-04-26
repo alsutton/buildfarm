@@ -84,6 +84,7 @@ class Executor {
   private final java.util.concurrent.Executor pollerExecutor;
   private int exitCode = INCOMPLETE_EXIT_CODE;
   private boolean wasErrored = false;
+  private boolean polling = false;
 
   Executor(
       WorkerContext workerContext,
@@ -166,7 +167,7 @@ class Executor {
     if (limits.useExecutionPolicies) {
       policies =
           ExecutionPolicies.forPlatform(
-              executionContext.command.getPlatform(), workerContext::getExecutionPolicies);
+              executionContext.queueEntry.getPlatform(), workerContext::getExecutionPolicies);
     }
     // since pools mandate injection of resources, each pool claim must require a policy
     // could probably do this with just the properties and the pool resource sets, but this is
@@ -175,10 +176,13 @@ class Executor {
       policies = Iterables.concat(policies, workerContext.getExecutionPolicies("pool-" + pool));
     }
 
+    polling = true;
     try {
       return executePolled(limits, policies, timeout, stopwatch);
     } finally {
-      executionContext.poller.pause();
+      if (polling) {
+        executionContext.poller.pause();
+      }
     }
   }
 
@@ -293,12 +297,13 @@ class Executor {
     // similar to the policy selection here
     Map<String, Interpolator> interpolations =
         createInterpolations(
-            executionContext.claim, executionContext.command.getPlatform().getPropertiesList());
+            executionContext.claim, executionContext.queueEntry.getPlatform().getPropertiesList());
 
     ImmutableList.Builder<String> arguments = ImmutableList.builder();
 
+    // Apply custom PRIORITIZED execution policies BEFORE built-in wrappers
     for (ExecutionPolicy policy : policies) {
-      if (policy.getExecutionWrapper() != null) {
+      if (policy.isPrioritized() && policy.getExecutionWrapper() != null) {
         arguments.addAll(transformWrapper(policy.getExecutionWrapper(), interpolations));
       }
     }
@@ -311,6 +316,13 @@ class Executor {
             arguments,
             executionContext.command,
             workingDirectory)) {
+      // Apply all other custom execution policies AFTER built-in wrappers
+      for (ExecutionPolicy policy : policies) {
+        if (!policy.isPrioritized() && policy.getExecutionWrapper() != null) {
+          arguments.addAll(transformWrapper(policy.getExecutionWrapper(), interpolations));
+        }
+      }
+
       // Windows requires that relative command programs are absolutized
       Iterator<String> argumentItr = command.getArgumentsList().iterator();
       boolean absolutizeExe =
@@ -410,6 +422,7 @@ class Executor {
         }
       }
     }
+    polling = false;
     return stopwatch.elapsed(MICROSECONDS) - executeUSecs;
   }
 

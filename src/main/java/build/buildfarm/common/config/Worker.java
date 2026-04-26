@@ -33,6 +33,7 @@ import lombok.extern.java.Log;
 @Log
 public class Worker {
   private int port = 8981;
+  private boolean grpcChannelz = false;
   private GrpcMetrics grpcMetrics = new GrpcMetrics();
   private String publicName;
   private Capabilities capabilities = new Capabilities();
@@ -48,7 +49,7 @@ public class Worker {
   private int reportResultStageWidth = 1;
   private boolean linkExecFileSystem = true;
   private boolean linkInputDirectories = true;
-  private List<String> linkedInputDirectories = Arrays.asList("(?!external/)[^/]+");
+  private List<String> linkedInputDirectories = Arrays.asList("^(?!external$).*$");
   private String execOwner;
   private List<String> execOwners = new ArrayList<>();
   private int defaultMaxCores = 0;

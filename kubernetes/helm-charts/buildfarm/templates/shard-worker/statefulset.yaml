@@ -9,6 +9,7 @@ metadata:
   annotations:
     {{- toYaml .Values.shardWorker.annotations | nindent 4 }}
 spec:
+  podManagementPolicy: {{ .Values.shardWorker.podManagementPolicy }}
   serviceName: {{ include "buildfarm.fullname" . }}-shard-worker
   {{- if .Values.shardWorker.autoscaling.enabled }}
   replicas: {{ .Values.shardWorker.autoscaling.minReplicas }}
@@ -48,7 +49,7 @@ spec:
             - name: CONFIG_PATH
               value: /config/config.yml
             - name: JAVA_TOOL_OPTIONS
-              value: -XX:+UseContainerSupport -XX:MaxRAMPercentage=80.0 -XX:+UseStringDeduplication -XX:+UseCompressedOops -XX:+HeapDumpOnOutOfMemoryError -Djava.util.logging.config.file=/shard-worker-log-props/logging.properties
+              value: {{ .Values.shardWorker.javaToolOptions }}
             - name: POD_IP
               valueFrom:
                 fieldRef:
@@ -62,16 +63,24 @@ spec:
               name: "worker-comm"
             - containerPort: 9090
               name: "metrics"
+          {{- with .Values.shardWorker.livenessProbe }}
           livenessProbe:
-            grpc:
-              port: 8982
-            initialDelaySeconds: 10
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.shardWorker.readinessProbe }}
           readinessProbe:
-            grpc:
-              port: 8982
-            initialDelaySeconds: 10
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.shardWorker.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.shardWorker.resources | nindent 12 }}
+          {{- with .Values.shardWorker.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - mountPath: /config
               name: config

@@ -14,10 +14,10 @@ jobs:
     permissions:
       pages: write
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd   # v6.0.2
 
       # Use GitHub Actions' cache to cache dependencies on servers
-    - uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f   # v4
+    - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7   # v5.0.4
       with:
         path: vendor/bundle
         key: ${{ runner.os }}-gems-${{ hashFiles('**/Gemfile.lock') }}
@@ -25,7 +25,7 @@ jobs:
           ${{ runner.os }}-gems-
 
       # Use GitHub Deploy Action to build and deploy to Github
-    - uses: jeffreytse/jekyll-deploy-action@c1329290ab1cf2df48661ec1bea92e1d6990025b   # v0.6.0
+    - uses: jeffreytse/jekyll-deploy-action@222a6b06c846416d654db18142eab0da528cdb4f   # v0.7.0
       with:
         provider: github
         token: ${{ secrets.GH_TOKEN }}   # It's your Personal Access Token(PAT)

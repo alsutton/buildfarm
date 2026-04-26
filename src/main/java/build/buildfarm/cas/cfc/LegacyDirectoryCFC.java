@@ -39,6 +39,8 @@ import build.buildfarm.common.ZstdDecompressingOutputStream.FixedBufferPool;
 import build.buildfarm.common.io.Directories;
 import build.buildfarm.common.io.NamedFileKey;
 import build.buildfarm.v1test.Digest;
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Maps;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -61,9 +63,9 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.function.Consumer;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public class LegacyDirectoryCFC extends CASFileCache {
@@ -200,15 +202,13 @@ public class LegacyDirectoryCFC extends CASFileCache {
   }
 
   private static final class LockMap {
-    private final Map<Path, Lock> mutexes = Maps.newHashMap();
+    /*
+     * Using weak values is important to avoid memory leaks, and avoid the caller from cleaning up.
+     */
+    private final Cache<Path, Lock> mutexes = Caffeine.newBuilder().weakValues().build();
 
     private synchronized Lock acquire(Path key) {
-      Lock mutex = mutexes.get(key);
-      if (mutex == null) {
-        mutex = new SharedLock();
-        mutexes.put(key, mutex);
-      }
-      return mutex;
+      return mutexes.get(key, path -> new SharedLock());
     }
   }
 

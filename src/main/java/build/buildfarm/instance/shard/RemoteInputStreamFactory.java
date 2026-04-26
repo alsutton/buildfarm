@@ -28,6 +28,7 @@ import build.bazel.remote.execution.v2.RequestMetadata;
 import build.buildfarm.backplane.Backplane;
 import build.buildfarm.common.DigestUtil;
 import build.buildfarm.common.InputStreamFactory;
+import build.buildfarm.common.config.BuildfarmConfigs;
 import build.buildfarm.instance.Instance;
 import build.buildfarm.instance.shard.ServerInstance.WorkersCallback;
 import build.buildfarm.instance.stub.StubInstance;
@@ -53,8 +54,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
+import java.util.stream.Collectors;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public class RemoteInputStreamFactory implements InputStreamFactory {
@@ -151,7 +153,12 @@ public class RemoteInputStreamFactory implements InputStreamFactory {
   public InputStream newInput(Compressor.Value compressor, Digest blobDigest, long offset)
       throws IOException {
     return newInput(
-        compressor, blobDigest, offset, 60, SECONDS, RequestMetadata.getDefaultInstance());
+        compressor,
+        blobDigest,
+        offset,
+        BuildfarmConfigs.getInstance().getServer().getCasReadTimeout(),
+        SECONDS,
+        RequestMetadata.getDefaultInstance());
   }
 
   public InputStream newInput(
@@ -165,7 +172,10 @@ public class RemoteInputStreamFactory implements InputStreamFactory {
     Set<String> remoteWorkers;
     Set<String> locationSet;
     try {
-      remoteWorkers = backplane.getStorageWorkers();
+      remoteWorkers =
+          backplane.getStorageWorkers().stream()
+              .map(w -> w.getEndpoint())
+              .collect(Collectors.toSet());
       if (publicName != null) {
         remoteWorkers.remove(publicName);
       }

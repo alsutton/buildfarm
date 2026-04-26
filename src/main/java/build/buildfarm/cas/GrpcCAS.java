@@ -60,11 +60,12 @@ import io.grpc.StatusRuntimeException;
 import io.grpc.stub.ServerCallStreamObserver;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.StreamSupport;
-import javax.annotation.Nullable;
+import org.jspecify.annotations.Nullable;
 
 public class GrpcCAS implements ContentAddressableStorage {
   private final String instanceName;
@@ -294,6 +295,18 @@ public class GrpcCAS implements ContentAddressableStorage {
         Functions.identity(),
         digest.getSize(),
         /* autoflush= */ false);
+  }
+
+  @Override
+  public boolean isReadOnly() {
+    return readonly;
+  }
+
+  @Override
+  public void waitForWritable(Duration timeout) {
+    if (readonly) {
+      throw new UnsupportedOperationException();
+    }
   }
 
   @Override

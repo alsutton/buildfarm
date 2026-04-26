@@ -24,6 +24,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 import redis.clients.jedis.JedisCluster;
+import redis.clients.jedis.params.GetExParams;
 
 /**
  * @class RedisMapMockTest
@@ -35,15 +36,6 @@ import redis.clients.jedis.JedisCluster;
  */
 @RunWith(JUnit4.class)
 public class RedisMapMockTest {
-  // Function under test: redisMap
-  // Reason for testing: the map can be constructed with a valid cluster instance and name
-  // Failure explanation: the map is throwing an exception upon construction
-  @Test
-  public void redisMapConstructsWithoutError() throws Exception {
-    // ARRANGE
-    new RedisMap("test");
-  }
-
   // Function under test: insert
   // Reason for testing: test how an element is added to a map
   // Failure explanation: jedis was not called as expected
@@ -51,7 +43,7 @@ public class RedisMapMockTest {
   public void insertInsert() throws Exception {
     // ARRANGE
     JedisCluster redis = mock(JedisCluster.class);
-    RedisMap map = new RedisMap("test");
+    RedisMap<String> map = new RedisMap<>("test", new IdentityTranslator());
 
     // ACT
     map.insert(redis, "key", "value", 60);
@@ -67,7 +59,7 @@ public class RedisMapMockTest {
   public void removeRemove() throws Exception {
     // ARRANGE
     JedisCluster redis = mock(JedisCluster.class);
-    RedisMap map = new RedisMap("test");
+    RedisMap<String> map = new RedisMap<>("test", new IdentityTranslator());
 
     // ACT
     map.insert(redis, "key", "value", 60);
@@ -85,7 +77,7 @@ public class RedisMapMockTest {
     // ARRANGE
     JedisCluster redis = mock(JedisCluster.class);
     when(redis.get("test:key")).thenReturn("value");
-    RedisMap map = new RedisMap("test");
+    RedisMap<String> map = new RedisMap<>("test", new IdentityTranslator());
 
     // ACT
     map.insert(redis, "key", "value", 60);
@@ -93,6 +85,26 @@ public class RedisMapMockTest {
 
     // ASSERT
     verify(redis, times(1)).get("test:key");
+    assertThat(value).isEqualTo("value");
+  }
+
+  // Function under test: getex
+  // Reason for testing: test how an element is looked up in a map
+  // Failure explanation: jedis was not called as expected
+  @Test
+  public void getGetEx() throws Exception {
+    // ARRANGE
+    JedisCluster redis = mock(JedisCluster.class);
+    GetExParams params = GetExParams.getExParams().ex(60);
+    when(redis.getEx("test:key", params)).thenReturn("value");
+    RedisMap<String> map = new RedisMap<>("test", new IdentityTranslator());
+
+    // ACT
+    map.insert(redis, "key", "value", 60);
+    String value = map.getex(redis, "key", 60);
+
+    // ASSERT
+    verify(redis, times(1)).getEx("test:key", params);
     assertThat(value).isEqualTo("value");
   }
 }

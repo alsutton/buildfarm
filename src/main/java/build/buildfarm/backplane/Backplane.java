@@ -35,13 +35,14 @@ import build.buildfarm.worker.resources.LocalResourceSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.longrunning.Operation;
 import java.io.IOException;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
-import javax.annotation.Nullable;
 import lombok.Data;
 import net.jcip.annotations.ThreadSafe;
+import org.jspecify.annotations.Nullable;
 
 @ThreadSafe
 public interface Backplane {
@@ -113,14 +114,19 @@ public interface Backplane {
   ScanResult<String> scanCorrelatedInvocationIndexEntries(String cursor, int count, String keyMatch)
       throws IOException;
 
+  ScanResult<Map.Entry<String, QueueEntry>> scanQueuedOperations(String cursor, int count)
+      throws IOException;
+
+  ScanResult<ExecuteEntry> scanPrequeuedOperations(String cursor, int count) throws IOException;
+
   /** Returns a map of the worker name and its start time for given workers. */
   Map<String, Long> getWorkersStartTimeInEpochSecs(Set<String> workerNames) throws IOException;
 
   /** Returns the insert time epoch in seconds for the digest. */
   long getDigestInsertTime(Digest blobDigest) throws IOException;
 
-  /** Returns a set of the names of all active storage workers. */
-  Set<String> getStorageWorkers() throws IOException;
+  /** Returns the entry iterable of all active storage workers. */
+  Collection<ShardWorker> getStorageWorkers() throws IOException;
 
   // TODO this is just a namespace, but kind of jank for just digest function as a string...
   /**
@@ -146,7 +152,7 @@ public interface Backplane {
    * Identify an action that should not be executed, and respond to all requests it matches with
    * failover-compatible responses.
    */
-  void blacklistAction(String actionId) throws IOException;
+  void blocklistAction(String actionId) throws IOException;
 
   /**
    * The AC stores full ActionResult objects in a hash map where the key is the digest of the action
@@ -281,8 +287,7 @@ public interface Backplane {
    * @return An execution if the actionKey has an association, null otherwise.
    * @note Suggested return identifier: execution.
    */
-  @Nullable
-  Operation mergeExecution(ActionKey actionKey) throws IOException;
+  @Nullable Operation mergeExecution(ActionKey actionKey) throws IOException;
 
   /**
    * @brief Remove actionKey execution merge association.
@@ -306,8 +311,8 @@ public interface Backplane {
 
   void queue(QueueEntry queueEntry, Operation operation) throws IOException;
 
-  /** Test for whether a request is blacklisted */
-  boolean isBlacklisted(RequestMetadata requestMetadata) throws IOException;
+  /** Test for whether a request is blocklisted */
+  boolean isBlocklisted(RequestMetadata requestMetadata) throws IOException;
 
   /** Test for whether an operation may be queued */
   boolean canQueue() throws IOException;

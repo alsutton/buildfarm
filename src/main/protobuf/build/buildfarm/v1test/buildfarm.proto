@@ -276,6 +276,8 @@ message ShardWorker {
   int32 worker_type = 3;
 
   int64 first_registered_at = 4;
+
+  bool read_only = 5;
 }
 
 message WorkerChange {
@@ -455,6 +457,8 @@ message BackplaneStatus {
 
   repeated string active_storage_workers = 12;
 
+  repeated ShardWorker workers = 14;
+
   repeated string active_execute_workers = 13;
 
   int64 cas_lookup_size = 5;
@@ -593,7 +597,25 @@ message StageInformation {
   repeated string operation_names = 4;
 }
 
+message BatchWorkerProfilesResponse {
+  message Response {
+    string worker_name = 1;
+
+    WorkerProfileMessage profile = 2;
+
+    google.rpc.Status status = 3;
+  }
+
+  repeated Response responses = 1;
+}
+
 message WorkerProfileMessage {
+  // useful name for worker
+  string name = 15;
+
+  // preferred way to contact this worker
+  string endpoint = 16;
+
   // number of Entry in CAS
   int64 cas_entry_count = 1;
 
@@ -618,6 +640,9 @@ message WorkerProfileMessage {
   // the total size of evicted Entries since last profile request
   int64 cas_evicted_entry_size = 6;
 
+  // If the CAS is in read-only mode
+  bool cas_read_only = 17;
+
   // used for removed fields representing composed used/configured slots
   reserved 7 to 8;
 
@@ -626,18 +651,22 @@ message WorkerProfileMessage {
   repeated OperationTimesBetweenStages times = 10;
 }
 
-message WorkerProfileRequest {}
+message WorkerProfileRequest {
+  string instance_name = 1;
 
-message WorkerListRequest {}
+  string worker_name = 2;
+}
 
-message WorkerListMessage {
-  repeated string workers = 1;
+message BatchWorkerProfilesRequest {
+  string instance_name = 1;
+
+  repeated string worker_names = 2;
 }
 
 service WorkerProfile {
   rpc GetWorkerProfile(WorkerProfileRequest) returns (WorkerProfileMessage) {}
 
-  rpc GetWorkerList(WorkerListRequest) returns (WorkerListMessage) {}
+  rpc BatchWorkerProfiles(BatchWorkerProfilesRequest) returns (BatchWorkerProfilesResponse) {}
 }
 
 message PrepareWorkerForGracefulShutDownRequest {
@@ -648,9 +677,42 @@ message PrepareWorkerForGracefulShutDownRequest {
 
 message PrepareWorkerForGracefulShutDownRequestResults {}
 
-service ShutDownWorker {
+service WorkerControl {
   rpc PrepareWorkerForGracefulShutdown(PrepareWorkerForGracefulShutDownRequest)
-      returns (PrepareWorkerForGracefulShutDownRequestResults) {}
+      returns (PrepareWorkerForGracefulShutDownRequestResults) {
+    option (google.api.http) = {
+      post: "/v1test/{instance_name=**}/pipeline:change"
+      body: "*"
+    };
+  }
+
+  rpc PipelineChange(WorkerPipelineChangeRequest)
+      returns (WorkerPipelineChangeResponse) {
+    option (google.api.http) = {
+      post: "/v1test/{instance_name=**}/pipeline:change"
+      body: "*"
+    };
+  }
+}
+
+message PipelineChange {
+  string stage = 1;
+
+  bool paused = 2;
+
+  int32 width = 3;
+}
+
+message WorkerPipelineChangeRequest {
+  string instance_name = 1;
+
+  string worker_name = 2;
+
+  repeated PipelineChange changes = 3;
+}
+
+message WorkerPipelineChangeResponse {
+  repeated PipelineChange changes = 1;
 }
 
 message FetchQualifiers {
@@ -667,4 +729,10 @@ message Digest {
   int64 size = 2;
 
   build.bazel.remote.execution.v2.DigestFunction.Value digest_function = 3;
+}
+
+message WorkerExecutedMetadata {
+  int64 fetched_bytes = 1;
+
+  repeated string linked_input_directories = 2;
 }

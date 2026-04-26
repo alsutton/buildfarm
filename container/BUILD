@@ -35,12 +35,7 @@ DEFAULT_PACKAGE_DIR = "app/build_buildfarm"
 # operating systems.  We make a best effort and ensure they all work in the below images.
 pkg_tar(
     name = "execution_wrappers",
-    srcs = select({
-        "@platforms//cpu:aarch64": [],
-        "//conditions:default": [
-            ":exec-wrapper-helpers",
-        ],
-    }) + [
+    srcs = [
         ":exec-wrapper-files",
     ],
     package_dir = DEFAULT_PACKAGE_DIR,
@@ -94,16 +89,10 @@ pkg_files(
 
 pkg_files(
     name = "exec-wrapper-files",
-    srcs = select({
-        "@platforms//cpu:aarch64": [],
-        "//conditions:default": [
-            "@skip_sleep",
-            # The delay wrapper is only intended to be used with the "skip_sleep" wrapper.
-            "//:delay.sh",
-        ],
-    }) + [
+    srcs = [
         # keep sorted
         "//:as-nobody",
+        "//:cgexec-wrapper",
         "//:macos-wrapper.sh",
         "@bazel//src/main/tools:linux-sandbox",
         "@bazel//src/main/tools:process-wrapper",
@@ -111,19 +100,6 @@ pkg_files(
     attributes = pkg_attributes(
         mode = "0555",
     ),
-    tags = ["container"],
-)
-
-pkg_files(
-    name = "exec-wrapper-helpers",
-    srcs = ["@skip_sleep//:skip_sleep_preload"],
-    attributes = pkg_attributes(
-        mode = "0444",
-    ),
-    prefix = DEFAULT_PACKAGE_DIR,
-    renames = {
-        "@skip_sleep//:skip_sleep_preload": "skip_sleep_preload.so",
-    },
     tags = ["container"],
 )
 
@@ -163,7 +139,7 @@ pkg_tar(
 
 pkg_tar(
     name = "layer_logging_config",
-    srcs = ["@build_buildfarm//src/main/java/build/buildfarm:configs"],
+    srcs = ["@build_buildfarm//examples:example_properties"],
     package_dir = DEFAULT_PACKAGE_DIR + "/src/main/java/build/buildfarm",
     tags = ["container"],
 )

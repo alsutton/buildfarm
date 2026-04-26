@@ -15,6 +15,8 @@
 package build.buildfarm.common.redis;
 
 import static com.google.common.collect.Iterables.transform;
+import static com.google.common.collect.Lists.newArrayList;
+import static redis.clients.jedis.params.ScanParams.SCAN_POINTER_START;
 
 import build.buildfarm.common.Queue;
 import build.buildfarm.common.Visitor;
@@ -24,6 +26,7 @@ import com.google.common.collect.ImmutableList;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -31,15 +34,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import javax.annotation.Nullable;
-import lombok.Data;
 import lombok.Getter;
+import org.jspecify.annotations.Nullable;
 import redis.clients.jedis.AbstractPipeline;
 import redis.clients.jedis.Connection;
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.JedisCluster;
 import redis.clients.jedis.JedisPooled;
 import redis.clients.jedis.UnifiedJedis;
+import redis.clients.jedis.resps.ScanResult;
 import redis.clients.jedis.util.JedisClusterCRC16;
 
 /**
@@ -51,28 +54,19 @@ import redis.clients.jedis.util.JedisClusterCRC16;
  *     (since it exists in redis). Therefore, two redis queues with the same name, would in fact be
  *     the same underlying redis queues.
  */
-public class BalancedRedisQueue {
+public class BalancedRedisQueue<E> {
   private static final Duration START_TIMEOUT = Duration.ofSeconds(1);
 
   private static final Duration MAX_TIMEOUT = Duration.ofSeconds(8);
 
-  @Data
-  public static final class BalancedQueueEntry {
-    private final String queue;
-    private final String value;
+  public record BalancedQueueEntry<E>(String queue, E value) {}
 
-    BalancedQueueEntry(String queue, String value) {
-      this.queue = queue;
-      this.value = value;
-    }
-  }
-
-  private static Visitor<String> createBalancedQueueVisitor(
-      String queue, Visitor<BalancedQueueEntry> visitor) {
+  private static <E> Visitor<E> createBalancedQueueVisitor(
+      String queue, Visitor<BalancedQueueEntry<E>> visitor) {
     return new Visitor<>() {
       @Override
-      public void visit(String value) {
-        visitor.visit(new BalancedQueueEntry(queue, value));
+      public void visit(E value) {
+        visitor.visit(new BalancedQueueEntry<>(queue, value));
       }
     };
   }
@@ -113,7 +107,7 @@ public class BalancedRedisQueue {
    */
   private final List<String> queues;
 
-  private final QueueDecorator<String> queueDecorator;
+  private final QueueDecorator<E> queueDecorator;
 
   /**
    * @field currentPushQueue
@@ -138,7 +132,7 @@ public class BalancedRedisQueue {
    * @param hashtags Hashtags to distribute queue data.
    * @note Overloaded.
    */
-  public BalancedRedisQueue(String name, List<String> hashtags, QueueDecorator queueDecorator) {
+  public BalancedRedisQueue(String name, List<String> hashtags, QueueDecorator<E> queueDecorator) {
     this(name, hashtags, -1, queueDecorator);
   }
 
@@ -151,12 +145,12 @@ public class BalancedRedisQueue {
    * @note Overloaded.
    */
   public BalancedRedisQueue(
-      String name, List<String> hashtags, int maxQueueSize, QueueDecorator queueDecorator) {
+      String name, List<String> hashtags, int maxQueueSize, QueueDecorator<E> queueDecorator) {
     this(name, maxQueueSize, createHashedQueues(name, hashtags), queueDecorator);
   }
 
   public BalancedRedisQueue(
-      String name, int maxQueueSize, List<String> queues, QueueDecorator queueDecorator) {
+      String name, int maxQueueSize, List<String> queues, QueueDecorator<E> queueDecorator) {
     this.originalHashtag = RedisHashtags.existingHash(name);
     this.name = RedisHashtags.unhashedName(name);
     this.maxQueueSize = maxQueueSize;
@@ -169,10 +163,10 @@ public class BalancedRedisQueue {
    * @details Adds the value into one of the internal backend redis queues.
    * @param val The value to push onto the queue.
    */
-  public boolean offer(UnifiedJedis unified, String val) {
+  public boolean offer(UnifiedJedis unified, E e) {
     String queue = queues.get(roundRobinPushIndex());
     try (Jedis jedis = getJedisFromKey(unified, queue)) {
-      return queueDecorator.decorate(jedis, queue).offer(val);
+      return queueDecorator.decorate(jedis, queue).offer(e);
     }
   }
 
@@ -181,37 +175,38 @@ public class BalancedRedisQueue {
    * @details Adds the value into one of the internal backend redis queues.
    * @param val The value to push onto the queue.
    */
-  public boolean offer(UnifiedJedis unified, String val, double priority) {
+  public boolean offer(UnifiedJedis unified, E e, double priority) {
     String queue = queues.get(roundRobinPushIndex());
     try (Jedis jedis = getJedisFromKey(unified, queue)) {
-      return queueDecorator.decorate(jedis, queue).offer(val, priority);
+      return queueDecorator.decorate(jedis, queue).offer(e, priority);
     }
   }
 
   /**
    * @brief Remove element from dequeue.
    * @details Removes an element from the dequeue and specifies whether it was removed.
-   * @param val The value to remove.
+   * @param balancedQueueEntry The value to remove.
    * @return Whether or not the value was removed.
    * @note Suggested return identifier: wasRemoved.
    */
-  public boolean removeFromDequeue(UnifiedJedis unified, BalancedQueueEntry balancedQueueEntry) {
-    String queue = balancedQueueEntry.getQueue();
+  public boolean removeFromDequeue(UnifiedJedis unified, BalancedQueueEntry<E> balancedQueueEntry) {
+    String queue = balancedQueueEntry.queue();
     try (Jedis jedis = getJedisFromKey(unified, queue)) {
-      if (queueDecorator.decorate(jedis, queue).removeFromDequeue(balancedQueueEntry.getValue())) {
+      if (queueDecorator.decorate(jedis, queue).removeFromDequeue(balancedQueueEntry.value())) {
         return true;
       }
     }
     return false;
   }
 
-  public void removeFromDequeue(AbstractPipeline pipeline, BalancedQueueEntry balancedQueueEntry) {
+  public void removeFromDequeue(
+      AbstractPipeline pipeline, BalancedQueueEntry<E> balancedQueueEntry) {
     queueDecorator
-        .decorate(null, balancedQueueEntry.getQueue())
-        .removeFromDequeue(pipeline, balancedQueueEntry.getValue());
+        .decorate(null, balancedQueueEntry.queue())
+        .removeFromDequeue(pipeline, balancedQueueEntry.value());
   }
 
-  private String take(Jedis jedis, Queue<String> queue, Duration timeout, ExecutorService service)
+  private E take(Jedis jedis, Queue<E> queue, Duration timeout, ExecutorService service)
       throws InterruptedException {
     return interruptibleRequest(() -> queue.take(timeout), jedis::disconnect, service);
   }
@@ -243,8 +238,8 @@ public class BalancedRedisQueue {
     }
   }
 
-  public BalancedQueueEntry takeAny(UnifiedJedis unified, Duration timeout, ExecutorService service)
-      throws InterruptedException {
+  public BalancedQueueEntry<E> takeAny(
+      UnifiedJedis unified, Duration timeout, ExecutorService service) throws InterruptedException {
     // consider duration / queues.size() timeouts
     Duration queueTimeout = timeout.dividedBy(queues.size());
     int startIndex = currentPopQueue;
@@ -252,10 +247,10 @@ public class BalancedRedisQueue {
     do {
       String queueName = queues.get(currentIndex);
       try (Jedis jedis = getJedisFromKey(unified, queueName)) {
-        Queue<String> queue = queueDecorator.decorate(jedis, queueName);
-        String item = take(jedis, queue, queueTimeout, service);
+        Queue<E> queue = queueDecorator.decorate(jedis, queueName);
+        E item = take(jedis, queue, queueTimeout, service);
         if (item != null) {
-          return new BalancedQueueEntry(queueName, item);
+          return new BalancedQueueEntry<>(queueName, item);
         }
       }
       currentIndex = roundRobinPopIndex();
@@ -271,7 +266,7 @@ public class BalancedRedisQueue {
    * @return The value of the transfered element. null if the thread was interrupted.
    * @note Suggested return identifier: val.
    */
-  public BalancedQueueEntry take(UnifiedJedis unified, ExecutorService service)
+  public BalancedQueueEntry<E> take(UnifiedJedis unified, ExecutorService service)
       throws InterruptedException {
     // The conditions of this algorithm are as followed:
     // - from a client's perspective we want to block indefinitely.
@@ -296,10 +291,10 @@ public class BalancedRedisQueue {
     // try each of the internal queues with exponential backoff
     Duration currentTimeout = START_TIMEOUT;
     while (true) {
-      final String val;
+      final E val;
       String queueName = queues.get(roundRobinPopIndex());
       try (Jedis jedis = getJedisFromKey(unified, queueName)) {
-        Queue<String> queue = queueDecorator.decorate(jedis, queueName);
+        Queue<E> queue = queueDecorator.decorate(jedis, queueName);
         if (blocking) {
           val = take(jedis, queue, currentTimeout, service);
         } else {
@@ -308,7 +303,7 @@ public class BalancedRedisQueue {
       }
       // return if found
       if (val != null) {
-        return new BalancedQueueEntry(queueName, val);
+        return new BalancedQueueEntry<>(queueName, val);
       }
 
       // not quite immediate yet...
@@ -345,15 +340,15 @@ public class BalancedRedisQueue {
 
   // BalancedQueue -> BalancedRedisQueue
   // make into decorated pattern
-  public @Nullable BalancedQueueEntry pollAny(UnifiedJedis unified) throws InterruptedException {
+  public @Nullable BalancedQueueEntry<E> pollAny(UnifiedJedis unified) throws InterruptedException {
     int startIndex = currentPopQueue;
     int currentIndex = roundRobinPopIndex();
     do {
       String queueName = queues.get(currentIndex);
       try (Jedis jedis = getJedisFromKey(unified, queueName)) {
-        String item = queueDecorator.decorate(jedis, queueName).poll();
+        E item = queueDecorator.decorate(jedis, queueName).poll();
         if (item != null) {
-          return new BalancedQueueEntry(queueName, item);
+          return new BalancedQueueEntry<>(queueName, item);
         }
       }
       currentIndex = roundRobinPopIndex();
@@ -481,7 +476,7 @@ public class BalancedRedisQueue {
    * @details Enacts a visitor over each element in the queue.
    * @param visitor A visitor for each visited element in the queue.
    */
-  public void visit(UnifiedJedis unified, Visitor<BalancedQueueEntry> visitor) {
+  public void visit(UnifiedJedis unified, Visitor<BalancedQueueEntry<E>> visitor) {
     for (String queue : fullIterationQueueOrder()) {
       try (Jedis jedis = getJedisFromKey(unified, queue)) {
         queueDecorator.decorate(jedis, queue).visit(createBalancedQueueVisitor(queue, visitor));
@@ -494,7 +489,7 @@ public class BalancedRedisQueue {
    * @details Enacts a visitor over each element in the dequeue.
    * @param visitor A visitor for each visited element in the queue.
    */
-  public void visitDequeue(UnifiedJedis unified, Visitor<BalancedQueueEntry> visitor) {
+  public void visitDequeue(UnifiedJedis unified, Visitor<BalancedQueueEntry<E>> visitor) {
     for (String queue : fullIterationQueueOrder()) {
       try (Jedis jedis = getJedisFromKey(unified, queue)) {
         queueDecorator
@@ -631,5 +626,62 @@ public class BalancedRedisQueue {
     List<String> randomQueues = new ArrayList<>(queues);
     Collections.shuffle(randomQueues);
     return randomQueues;
+  }
+
+  public ScanResult<BalancedQueueEntry<E>> scan(
+      UnifiedJedis unified, String queueCursor, int count, String match) {
+    int queueIndex = queueCursor.indexOf('[') + 1;
+    String currentQueue = null;
+    if (queueIndex > 0) {
+      int queueEnd = queueCursor.indexOf(']');
+      currentQueue = queueCursor.substring(queueIndex, queueEnd);
+      queueCursor = queueCursor.substring(queueEnd + 1);
+    }
+    Iterator<String> queueIter = queues.iterator();
+
+    String queue = null;
+    while (currentQueue != null && !currentQueue.equals(queue) && queueIter.hasNext()) {
+      queue = queueIter.next();
+    }
+
+    if (currentQueue != null && !currentQueue.equals(queue)) {
+      return new ScanResult<>(SCAN_POINTER_START, new ArrayList<>());
+    }
+
+    List<BalancedQueueEntry<E>> result = new ArrayList<>(count);
+    while (result.size() < count) {
+      if (currentQueue == null || queueCursor.equals(SCAN_POINTER_START)) {
+        if (!queueIter.hasNext()) {
+          break;
+        }
+        currentQueue = queueIter.next();
+      }
+      // should we put the source hash in the result set?
+      // should we be trying to use the same jedis connection for each cycle?
+      final String entryQueue = currentQueue;
+      try (Jedis jedis = getJedisFromKey(unified, entryQueue)) {
+        ScanResult<E> scanResult =
+            queueDecorator
+                .decorate(jedis, currentQueue)
+                .scan(queueCursor, count - result.size(), match);
+        queueCursor = scanResult.getCursor();
+        result.addAll(
+            newArrayList(
+                transform(
+                    scanResult.getResult(), entry -> new BalancedQueueEntry<>(entryQueue, entry))));
+      }
+    }
+
+    if (queueCursor.equals(SCAN_POINTER_START)) {
+      currentQueue = null;
+      if (queueIter.hasNext()) {
+        currentQueue = queueIter.next();
+      }
+    }
+    String nextCursor = SCAN_POINTER_START;
+    if (currentQueue != null) {
+      nextCursor = "[" + currentQueue + "]" + queueCursor;
+    }
+    return new ScanResult(nextCursor, result);
   }
 }

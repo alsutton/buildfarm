@@ -14,6 +14,8 @@
 
 package build.buildfarm.worker.shard;
 
+import static com.google.common.util.concurrent.Futures.immediateFuture;
+
 import build.bazel.remote.execution.v2.Action;
 import build.bazel.remote.execution.v2.Command;
 import build.bazel.remote.execution.v2.Compressor;
@@ -22,8 +24,10 @@ import build.bazel.remote.execution.v2.Directory;
 import build.buildfarm.cas.ContentAddressableStorage;
 import build.buildfarm.common.DigestUtil;
 import build.buildfarm.v1test.Digest;
+import build.buildfarm.v1test.WorkerExecutedMetadata;
 import build.buildfarm.worker.ExecFileSystem;
 import build.buildfarm.worker.FuseCAS;
+import com.google.common.util.concurrent.ListenableFuture;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Path;
@@ -49,8 +53,10 @@ class FuseExecFileSystem implements ExecFileSystem {
   }
 
   @Override
-  public void start(Consumer<List<Digest>> onDigests, boolean skipLoad) {
+  public ListenableFuture<Void> start(
+      Consumer<List<Digest>> onDigests, boolean skipLoad, boolean writable) {
     // onDigests.accept(storage.getAllDigests());
+    return immediateFuture(null);
   }
 
   @Override
@@ -81,7 +87,8 @@ class FuseExecFileSystem implements ExecFileSystem {
       DigestFunction.Value digestFunction,
       Action action,
       Command command,
-      UserPrincipal owner)
+      UserPrincipal owner,
+      WorkerExecutedMetadata.Builder workerExecutedMetadata)
       throws IOException, InterruptedException {
     // FIXME insist that the FUSE perform permission checks against the owner
     fuseCAS.createInputRoot(

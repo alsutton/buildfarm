@@ -20,6 +20,7 @@ import build.bazel.remote.execution.v2.ExecutedActionMetadata;
 import build.bazel.remote.execution.v2.RequestMetadata;
 import build.buildfarm.common.Time;
 import build.buildfarm.v1test.OperationRequestMetadata;
+import build.buildfarm.v1test.WorkerExecutedMetadata;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.longrunning.Operation;
 import com.google.protobuf.InvalidProtocolBufferException;
@@ -121,7 +122,7 @@ public abstract class AbstractMetricsPublisher implements MetricsPublisher {
           queuedTime.observe(
               Time.toDurationSeconds(
                   executionMetadata.getQueuedTimestamp(),
-                  executionMetadata.getExecutionStartTimestamp()));
+                  executionMetadata.getWorkerStartTimestamp()));
           outputUploadTime.observe(
               Time.toDurationSeconds(
                   executionMetadata.getOutputUploadStartTimestamp(),
@@ -155,6 +156,7 @@ public abstract class AbstractMetricsPublisher implements MetricsPublisher {
             .add(ExecuteResponse.getDescriptor())
             .add(ExecuteOperationMetadata.getDescriptor())
             .add(PreconditionFailure.getDescriptor())
+            .add(WorkerExecutedMetadata.getDescriptor())
             .build();
 
     String formattedRequestMetadata =

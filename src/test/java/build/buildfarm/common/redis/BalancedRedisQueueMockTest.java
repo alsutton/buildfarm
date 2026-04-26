@@ -77,11 +77,11 @@ public class BalancedRedisQueueMockTest {
   public void removeFromDequeueFalseWhenValueIsMissing() throws Exception {
     // ARRANGE
     when(subQueue.removeFromDequeue(any(String.class))).thenReturn(false);
-    BalancedRedisQueue queue =
-        new BalancedRedisQueue("test", ImmutableList.of("test"), this::subQueueDecorate);
+    BalancedRedisQueue<String> queue =
+        new BalancedRedisQueue<>("test", ImmutableList.of("test"), this::subQueueDecorate);
 
     // ACT
-    Boolean success = queue.removeFromDequeue(redis, new BalancedQueueEntry("test", "baz"));
+    Boolean success = queue.removeFromDequeue(redis, new BalancedQueueEntry<>("test", "baz"));
 
     // ASSERT
     assertThat(success).isFalse();
@@ -95,8 +95,8 @@ public class BalancedRedisQueueMockTest {
   public void removeFromDequeueTrueWhenValueExists() throws Exception {
     // ARRANGE
     when(subQueue.removeFromDequeue(any(String.class))).thenReturn(true);
-    BalancedRedisQueue queue =
-        new BalancedRedisQueue("test", ImmutableList.of("test"), this::subQueueDecorate);
+    BalancedRedisQueue<String> queue =
+        new BalancedRedisQueue<>("test", ImmutableList.of("test"), this::subQueueDecorate);
 
     // ACT
     Boolean success = queue.removeFromDequeue(redis, new BalancedQueueEntry("test", "bar"));
@@ -122,7 +122,7 @@ public class BalancedRedisQueueMockTest {
     BalancedQueueEntry entry = queue.take(redis, service);
 
     // ASSERT
-    assertThat(entry.getValue()).isEqualTo("foo");
+    assertThat(entry.value()).isEqualTo("foo");
     service.shutdown();
     assertThat(service.awaitTermination(1, SECONDS)).isTrue();
   }
@@ -145,7 +145,7 @@ public class BalancedRedisQueueMockTest {
     BalancedQueueEntry entry = queue.take(redis, service);
 
     // ASSERT
-    assertThat(entry.getValue()).isEqualTo("foo");
+    assertThat(entry.value()).isEqualTo("foo");
     service.shutdown();
     assertThat(service.awaitTermination(1, SECONDS)).isTrue();
   }
@@ -263,10 +263,10 @@ public class BalancedRedisQueueMockTest {
 
     // ACT
     List<String> visited = new ArrayList<>();
-    Visitor<BalancedQueueEntry> visitor =
+    Visitor<BalancedQueueEntry<String>> visitor =
         new Visitor<>() {
-          public void visit(BalancedQueueEntry entry) {
-            visited.add(entry.getValue());
+          public void visit(BalancedQueueEntry<String> entry) {
+            visited.add(entry.value());
           }
         };
     queue.visit(redis, visitor);
@@ -307,10 +307,10 @@ public class BalancedRedisQueueMockTest {
 
     // ACT
     List<String> visited = new ArrayList<>();
-    Visitor<BalancedQueueEntry> visitor =
+    Visitor<BalancedQueueEntry<String>> visitor =
         new Visitor<>() {
-          public void visit(BalancedQueueEntry entry) {
-            visited.add(entry.getValue());
+          public void visit(BalancedQueueEntry<String> entry) {
+            visited.add(entry.value());
           }
         };
     queue.visitDequeue(redis, visitor);

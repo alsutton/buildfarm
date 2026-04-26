@@ -47,6 +47,7 @@ import build.bazel.remote.execution.v2.ContentAddressableStorageGrpc.ContentAddr
 import build.bazel.remote.execution.v2.Digest;
 import build.bazel.remote.execution.v2.DigestFunction;
 import build.bazel.remote.execution.v2.Directory;
+import build.bazel.remote.execution.v2.ExecuteRequest;
 import build.bazel.remote.execution.v2.ExecutionGrpc;
 import build.bazel.remote.execution.v2.ExecutionGrpc.ExecutionStub;
 import build.bazel.remote.execution.v2.ExecutionPolicy;
@@ -84,6 +85,8 @@ import build.buildfarm.v1test.AdminGrpc;
 import build.buildfarm.v1test.AdminGrpc.AdminBlockingStub;
 import build.buildfarm.v1test.BackplaneStatus;
 import build.buildfarm.v1test.BackplaneStatusRequest;
+import build.buildfarm.v1test.BatchWorkerProfilesRequest;
+import build.buildfarm.v1test.BatchWorkerProfilesResponse;
 import build.buildfarm.v1test.GetClientStartTimeRequest;
 import build.buildfarm.v1test.GetClientStartTimeResult;
 import build.buildfarm.v1test.OperationQueueGrpc;
@@ -94,13 +97,11 @@ import build.buildfarm.v1test.PrepareWorkerForGracefulShutDownRequestResults;
 import build.buildfarm.v1test.ReindexCasRequest;
 import build.buildfarm.v1test.ReindexCasRequestResults;
 import build.buildfarm.v1test.ShutDownWorkerGracefullyRequest;
-import build.buildfarm.v1test.ShutDownWorkerGrpc;
-import build.buildfarm.v1test.ShutDownWorkerGrpc.ShutDownWorkerBlockingStub;
 import build.buildfarm.v1test.Tree;
-import build.buildfarm.v1test.WorkerListMessage;
-import build.buildfarm.v1test.WorkerListRequest;
+import build.buildfarm.v1test.WorkerControlGrpc;
+import build.buildfarm.v1test.WorkerControlGrpc.WorkerControlBlockingStub;
 import build.buildfarm.v1test.WorkerProfileGrpc;
-import build.buildfarm.v1test.WorkerProfileGrpc.WorkerProfileBlockingStub;
+import build.buildfarm.v1test.WorkerProfileGrpc.WorkerProfileFutureStub;
 import build.buildfarm.v1test.WorkerProfileMessage;
 import build.buildfarm.v1test.WorkerProfileRequest;
 import com.google.bytestream.ByteStreamGrpc;
@@ -151,9 +152,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.logging.Level;
-import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 import lombok.extern.java.Log;
+import org.jspecify.annotations.Nullable;
 
 @Log
 public class StubInstance extends InstanceBase {
@@ -344,22 +345,22 @@ public class StubInstance extends InstanceBase {
           });
 
   @SuppressWarnings("Guava")
-  private final Supplier<WorkerProfileBlockingStub> workerProfileBlockingStub =
+  private final Supplier<WorkerProfileFutureStub> workerProfileFutureStub =
       Suppliers.memoize(
           new Supplier<>() {
             @Override
-            public WorkerProfileBlockingStub get() {
-              return WorkerProfileGrpc.newBlockingStub(channel);
+            public WorkerProfileFutureStub get() {
+              return WorkerProfileGrpc.newFutureStub(channel);
             }
           });
 
   @SuppressWarnings("Guava")
-  private final Supplier<ShutDownWorkerBlockingStub> shutDownWorkerBlockingStub =
+  private final Supplier<WorkerControlBlockingStub> workerControlBlockingStub =
       Suppliers.memoize(
           new Supplier<>() {
             @Override
-            public ShutDownWorkerBlockingStub get() {
-              return ShutDownWorkerGrpc.newBlockingStub(channel);
+            public WorkerControlBlockingStub get() {
+              return WorkerControlGrpc.newBlockingStub(channel);
             }
           });
 
@@ -539,6 +540,11 @@ public class StubInstance extends InstanceBase {
               response.getBlobDigest(), expectedDigest.getDigestFunction());
         },
         directExecutor());
+  }
+
+  @Override
+  public boolean isReadOnly() {
+    return false;
   }
 
   @Override
@@ -810,6 +816,7 @@ public class StubInstance extends InstanceBase {
     return nextPageToken;
   }
 
+  // future could be ExecuteResponse
   @Override
   public ListenableFuture<Void> execute(
       // TODO should this be ActionKey
@@ -819,7 +826,34 @@ public class StubInstance extends InstanceBase {
       ResultsCachePolicy resultsCachePolicy,
       RequestMetadata metadata,
       Watcher watcher) {
-    throw new UnsupportedOperationException();
+    SettableFuture<Void> result = SettableFuture.create();
+    newExStub()
+        .execute(
+            ExecuteRequest.newBuilder()
+                .setInstanceName(getName())
+                .setActionDigest(DigestUtil.toDigest(actionDigest))
+                .setDigestFunction(actionDigest.getDigestFunction())
+                .setExecutionPolicy(executionPolicy)
+                .setResultsCachePolicy(resultsCachePolicy)
+                .setSkipCacheLookup(true)
+                .build(),
+            new StreamObserver<Operation>() {
+              @Override
+              public void onNext(Operation operation) {
+                watcher.observe(operation);
+              }
+
+              @Override
+              public void onError(Throwable t) {
+                result.setException(t);
+              }
+
+              @Override
+              public void onCompleted() {
+                result.set(null);
+              }
+            });
+    return result;
   }
 
   @Override
@@ -938,14 +972,19 @@ public class StubInstance extends InstanceBase {
   }
 
   @Override
-  public WorkerProfileMessage getWorkerProfile() {
-    return deadlined(workerProfileBlockingStub)
-        .getWorkerProfile(WorkerProfileRequest.newBuilder().build());
+  public ListenableFuture<WorkerProfileMessage> getWorkerProfile(String name) {
+    return deadlined(workerProfileFutureStub)
+        .getWorkerProfile(WorkerProfileRequest.newBuilder().setWorkerName(name).build());
   }
 
   @Override
-  public WorkerListMessage getWorkerList() {
-    return workerProfileBlockingStub.get().getWorkerList(WorkerListRequest.newBuilder().build());
+  public ListenableFuture<BatchWorkerProfilesResponse> batchWorkerProfiles(Iterable<String> names) {
+    return deadlined(workerProfileFutureStub)
+        .batchWorkerProfiles(
+            BatchWorkerProfilesRequest.newBuilder()
+                .setInstanceName(getName())
+                .addAllWorkerNames(names)
+                .build());
   }
 
   @Override
@@ -978,7 +1017,7 @@ public class StubInstance extends InstanceBase {
   @Override
   public PrepareWorkerForGracefulShutDownRequestResults shutDownWorkerGracefully() {
     throwIfStopped();
-    return shutDownWorkerBlockingStub
+    return workerControlBlockingStub
         .get()
         .prepareWorkerForGracefulShutdown(
             PrepareWorkerForGracefulShutDownRequest.newBuilder().build());

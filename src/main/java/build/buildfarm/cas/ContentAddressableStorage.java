@@ -28,11 +28,12 @@ import com.google.protobuf.ByteString;
 import com.google.rpc.Code;
 import com.google.rpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
+import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
-import javax.annotation.Nullable;
 import lombok.Getter;
 import net.jcip.annotations.ThreadSafe;
+import org.jspecify.annotations.Nullable;
 
 @ThreadSafe
 public interface ContentAddressableStorage extends InputStreamFactory {
@@ -100,9 +101,13 @@ public interface ContentAddressableStorage extends InputStreamFactory {
       ServerCallStreamObserver<ByteString> blobObserver,
       RequestMetadata requestMetadata);
 
+  /** Whether attempts to write will fail */
+  boolean isReadOnly();
+
+  void waitForWritable(Duration timeout) throws InterruptedException;
+
   /** Acquire a write associated with the blob, may return null if readonly */
-  @Nullable
-  Write getWrite(
+  @Nullable Write getWrite(
       Compressor.Value compression, Digest digest, UUID uuid, RequestMetadata requestMetadata)
       throws EntryLimitException;
 

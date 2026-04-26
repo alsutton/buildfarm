@@ -1,3 +1,17 @@
+// Copyright 2023-2025 The Buildfarm Authors. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package persistent.common;
 
 import java.util.logging.Level;
@@ -36,18 +50,22 @@ public abstract class CommonsSupervisor<K, V extends Destructable>
   public void destroyObject(K key, PooledObject<V> p) {
     V obj = p.getObject();
 
-    StringBuilder msgBuilder = new StringBuilder();
-    msgBuilder.append("Supervisor.destroyObject() from key:\n");
-    msgBuilder.append(key);
-    msgBuilder.append("\nobj.toString():\n");
-    msgBuilder.append(obj);
-    msgBuilder.append("\nSupervisor.destroyObject() stackTrack:");
-    for (StackTraceElement e : Thread.currentThread().getStackTrace()) {
-      msgBuilder.append("\n\t");
-      msgBuilder.append(e);
-    }
+    var maybeOverriddenLogger = getLogger();
+    final var logLevel = Level.FINE;
+    if (maybeOverriddenLogger.isLoggable(logLevel)) {
+      StringBuilder msgBuilder = new StringBuilder();
+      msgBuilder.append("Supervisor.destroyObject() from key:\n");
+      msgBuilder.append(key);
+      msgBuilder.append("\nobj.toString():\n");
+      msgBuilder.append(obj);
+      msgBuilder.append("\nSupervisor.destroyObject() stackTrack:");
+      for (StackTraceElement e : Thread.currentThread().getStackTrace()) {
+        msgBuilder.append("\n\t");
+        msgBuilder.append(e);
+      }
 
-    getLogger().log(Level.FINE, msgBuilder.toString());
+      maybeOverriddenLogger.log(logLevel, msgBuilder.toString());
+    }
 
     obj.destroy();
   }

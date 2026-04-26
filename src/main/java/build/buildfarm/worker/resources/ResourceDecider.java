@@ -15,7 +15,6 @@
 package build.buildfarm.worker.resources;
 
 import build.bazel.remote.execution.v2.Command;
-import build.bazel.remote.execution.v2.Command.EnvironmentVariable;
 import build.buildfarm.common.CommandUtils;
 import build.buildfarm.common.config.SandboxSettings;
 import org.apache.commons.lang3.StringUtils;
@@ -32,7 +31,6 @@ public final class ResourceDecider {
    * @details Platform properties from specified exec_properties are taken into account as well as
    *     global buildfarm configuration.
    * @param command The command to decide resource limitations for.
-   * @param workerName The name of the worker taking on the action.
    * @param onlyMulticoreTests Only allow tests to be multicore.
    * @param defaultMaxCores The unspecified maximum constraint for cores.
    * @param limitGlobalExecution Whether cpu limiting should be explicitly performed.
@@ -45,7 +43,6 @@ public final class ResourceDecider {
    */
   public static ResourceLimits decideResourceLimitations(
       Command command,
-      String workerName,
       int defaultMaxCores,
       boolean onlyMulticoreTests,
       boolean limitGlobalExecution,
@@ -59,7 +56,6 @@ public final class ResourceDecider {
     adjustLimits(
         limits,
         command,
-        workerName,
         defaultMaxCores,
         onlyMulticoreTests,
         limitGlobalExecution,
@@ -75,7 +71,6 @@ public final class ResourceDecider {
    * @details Existing limits configuration and buildfarm configuration are taken into account.
    * @param limits Existing limits chosen by the user's exec_properties.
    * @param command The command to decide resource limitations for.
-   * @param workerName The name of the worker taking on the action.
    * @param defaultMaxCores The unspecified maximum constraint for cores.
    * @param onlyMulticoreTests Only allow tests to be multicore.
    * @param limitGlobalExecution Whether cpu limiting should be explicitly performed.
@@ -87,16 +82,12 @@ public final class ResourceDecider {
   private static void adjustLimits(
       ResourceLimits limits,
       Command command,
-      String workerName,
       int defaultMaxCores,
       boolean onlyMulticoreTests,
       boolean limitGlobalExecution,
       int executeStageWidth,
       boolean allowBringYourOwnContainer,
       SandboxSettings sandbox) {
-    // store worker name
-    limits.workerName = workerName;
-
     // force limits on non-test actions
     if (onlyMulticoreTests && !CommandUtils.isTest(command)) {
       if (limits.cpu.min > 1 || limits.cpu.max > defaultMaxCores) {
@@ -138,18 +129,6 @@ public final class ResourceDecider {
                 "min cores %d limited to specified max %d", limits.cpu.min, limits.cpu.max));
       }
       limits.cpu.min = Math.min(limits.cpu.max, limits.cpu.min);
-    }
-
-    // perform resource overrides based on test size
-    TestSizeResourceOverrides overrides = new TestSizeResourceOverrides();
-    if (overrides.enabled && CommandUtils.isTest(command)) {
-      TestSizeResourceOverride override = deduceSizeOverride(command, overrides);
-      limits.cpu.min = override.coreMin;
-      limits.cpu.max = override.coreMax;
-      limits.cpu.description.add(
-          String.format(
-              "cores are overridden due to test size (min=%d / max=%d",
-              override.coreMin, override.coreMax));
     }
 
     adjustDebugFlags(command, limits);
@@ -287,34 +266,5 @@ public final class ResourceDecider {
           val = val.replace("{{limits.cpu.claimed}}", String.valueOf(limits.cpu.claimed));
           return val;
         });
-  }
-
-  /**
-   * @brief Get resource overrides by analyzing the test command for it's "test size".
-   * @details test size is defined as an environment variable.
-   * @param command The test command to derive the size of.
-   * @return The resource overrides corresponding to the command's test size.
-   * @note Suggested return identifier: overrides.
-   */
-  private static TestSizeResourceOverride deduceSizeOverride(
-      Command command, TestSizeResourceOverrides overrides) {
-    for (EnvironmentVariable envVar : command.getEnvironmentVariablesList()) {
-      if (envVar.getName().equals("TEST_SIZE")) {
-        if (envVar.getValue().equals("small")) {
-          return overrides.small;
-        }
-        if (envVar.getValue().equals("medium")) {
-          return overrides.medium;
-        }
-        if (envVar.getValue().equals("large")) {
-          return overrides.large;
-        }
-        if (envVar.getValue().equals("enormous")) {
-          return overrides.enormous;
-        }
-      }
-    }
-
-    return overrides.unknown;
   }
 }

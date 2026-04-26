@@ -1,9 +1,20 @@
+// Copyright 2023-2025 The Buildfarm Authors. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//    https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package persistent.bazel.client;
 
-import com.google.common.hash.HashCode;
-import java.nio.file.Path;
 import java.util.Optional;
-import java.util.TreeSet;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.apache.commons.pool2.PooledObject;
@@ -49,32 +60,6 @@ public abstract class WorkerSupervisor extends CommonsSupervisor<WorkerKey, Pers
       return false;
     }
 
-    WorkerKey currentWorkerKey = worker.getKey();
-    boolean filesChanged =
-        !key.getWorkerFilesCombinedHash().equals(currentWorkerKey.getWorkerFilesCombinedHash());
-
-    if (filesChanged) {
-      StringBuilder msg = new StringBuilder();
-      msg.append("Worker can no longer be used, because its files have changed on disk:\n");
-      msg.append(key);
-      TreeSet<Path> files = new TreeSet<>();
-      files.addAll(key.getWorkerFilesWithHashes().keySet());
-      files.addAll(currentWorkerKey.getWorkerFilesWithHashes().keySet());
-      for (Path file : files) {
-        HashCode oldHash = currentWorkerKey.getWorkerFilesWithHashes().get(file);
-        HashCode newHash = key.getWorkerFilesWithHashes().get(file);
-        if (!oldHash.equals(newHash)) {
-          msg.append("\n")
-              .append(file.normalize())
-              .append(": ")
-              .append(oldHash != null ? oldHash : "<none>")
-              .append(" -> ")
-              .append(newHash != null ? newHash : "<none>");
-        }
-      }
-      logger.log(Level.SEVERE, msg.toString());
-    }
-
-    return !filesChanged;
+    return true;
   }
 }

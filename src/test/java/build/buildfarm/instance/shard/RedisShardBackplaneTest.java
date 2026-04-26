@@ -14,7 +14,6 @@
 
 package build.buildfarm.instance.shard;
 
-import static build.buildfarm.instance.shard.RedisShardBackplane.parseOperationChange;
 import static com.google.common.truth.Truth.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.any;
@@ -31,12 +30,14 @@ import build.buildfarm.common.DigestUtil.HashFunction;
 import build.buildfarm.common.config.BuildfarmConfigs;
 import build.buildfarm.common.config.Queue;
 import build.buildfarm.common.redis.BalancedRedisQueue;
+import build.buildfarm.common.redis.BalancedRedisQueue.BalancedQueueEntry;
 import build.buildfarm.common.redis.Cluster;
 import build.buildfarm.common.redis.ClusterPipeline;
 import build.buildfarm.common.redis.RedisClient;
 import build.buildfarm.common.redis.RedisHashMap;
 import build.buildfarm.common.redis.RedisMap;
 import build.buildfarm.instance.shard.ExecutionQueue.ExecutionQueueEntry;
+import build.buildfarm.instance.shard.codec.ShardCodec;
 import build.buildfarm.v1test.Digest;
 import build.buildfarm.v1test.DispatchedOperation;
 import build.buildfarm.v1test.ExecuteEntry;
@@ -50,7 +51,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.longrunning.Operation;
 import com.google.protobuf.ByteString;
-import com.google.protobuf.util.JsonFormat;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.List;
@@ -90,43 +90,45 @@ public class RedisShardBackplaneTest {
         /* subscribeToBackplane= */ false,
         /* runFailsafeOperation= */ false,
         o -> o,
+        ShardCodec.DEFAULT_CODEC,
         mockJedisClusterFactory);
   }
 
   @Test
   public void workersWithInvalidProtobufAreRemoved() throws IOException {
+    ShardWorker worker = ShardWorker.newBuilder().setEndpoint("foo").build();
     UnifiedJedis jedis = mock(UnifiedJedis.class);
     when(mockJedisClusterFactory.get()).thenReturn(jedis);
     when(jedis.hgetAll(configs.getBackplane().getWorkersHashName() + "_storage"))
-        .thenReturn(ImmutableMap.of("foo", "foo"));
-    when(jedis.hdel(configs.getBackplane().getWorkersHashName() + "_storage", "foo"))
+        .thenReturn(
+            ImmutableMap.of(worker.getEndpoint(), ShardCodec.DEFAULT_CODEC.worker().print(worker)));
+    when(jedis.hdel(configs.getBackplane().getWorkersHashName() + "_storage", worker.getEndpoint()))
         .thenReturn(1L);
     RedisShardBackplane backplane = createBackplane("invalid-protobuf-worker-removed-test");
     backplane.start("startTime/test:0000", name -> {});
     assertThat(backplane.getStorageWorkers()).isEmpty();
-    verify(jedis, times(1)).hdel(configs.getBackplane().getWorkersHashName() + "_storage", "foo");
+    verify(jedis, times(1))
+        .hdel(configs.getBackplane().getWorkersHashName() + "_storage", worker.getEndpoint());
     ArgumentCaptor<String> changeCaptor = ArgumentCaptor.forClass(String.class);
     verify(jedis, times(1))
         .publish(eq(configs.getBackplane().getWorkerChannel()), changeCaptor.capture());
     String json = changeCaptor.getValue();
-    WorkerChange.Builder builder = WorkerChange.newBuilder();
-    JsonFormat.parser().merge(json, builder);
-    WorkerChange workerChange = builder.build();
-    assertThat(workerChange.getName()).isEqualTo("foo");
+    WorkerChange workerChange = ShardCodec.DEFAULT_CODEC.workerChange().parse(json).value();
+    assertThat(workerChange.getName()).isEqualTo(worker.getEndpoint());
     assertThat(workerChange.getTypeCase()).isEqualTo(WorkerChange.TypeCase.REMOVE);
   }
 
   OperationChange verifyChangePublished(String channel, UnifiedJedis jedis) throws IOException {
     ArgumentCaptor<String> changeCaptor = ArgumentCaptor.forClass(String.class);
     verify(jedis, times(1)).publish(eq(channel), changeCaptor.capture());
-    return parseOperationChange(changeCaptor.getValue());
+    return ShardCodec.DEFAULT_CODEC.operationChange().parse(changeCaptor.getValue()).value();
   }
 
   OperationChange verifyChangePublished(String channel, AbstractPipeline pipeline)
       throws IOException {
     ArgumentCaptor<String> changeCaptor = ArgumentCaptor.forClass(String.class);
     verify(pipeline, times(1)).publish(eq(channel), changeCaptor.capture());
-    return parseOperationChange(changeCaptor.getValue());
+    return ShardCodec.DEFAULT_CODEC.operationChange().parse(changeCaptor.getValue()).value();
   }
 
   String operationName(String name) {
@@ -151,20 +153,13 @@ public class RedisShardBackplaneTest {
         ExecuteEntry.newBuilder().setActionDigest(actionDigest).setOperationName(opName).build();
     Operation op = Operation.newBuilder().setName(opName).build();
     when(state.executions.create(
-            eq(jedis),
-            eq(DigestUtil.asActionKey(actionDigest).toString()),
-            eq(opName),
-            eq(RedisShardBackplane.operationPrinter.print(op))))
+            eq(jedis), eq(DigestUtil.asActionKey(actionDigest).toString()), eq(opName), eq(op)))
         .thenReturn(true);
 
     assertThat(backplane.prequeue(executeEntry, op, /* ignoreMerge= */ false)).isTrue();
 
     verify(state.executions, times(1))
-        .create(
-            eq(jedis),
-            eq(DigestUtil.asActionKey(actionDigest).toString()),
-            eq(opName),
-            eq(RedisShardBackplane.operationPrinter.print(op)));
+        .create(eq(jedis), eq(DigestUtil.asActionKey(actionDigest).toString()), eq(opName), eq(op));
     verifyNoMoreInteractions(state.executions);
     OperationChange opChange = verifyChangePublished(backplane.executionChannel(opName), jedis);
     assertThat(opChange.hasReset()).isTrue();
@@ -208,7 +203,7 @@ public class RedisShardBackplaneTest {
         .push(
             jedis,
             queueEntry.getPlatform().getPropertiesList(),
-            JsonFormat.printer().print(queueEntry),
+            queueEntry,
             queueEntry.getExecuteEntry().getExecutionPolicy().getPriority());
     verifyNoMoreInteractions(state.executionQueue);
     OperationChange opChange = verifyChangePublished(backplane.executionChannel(opName), jedis);
@@ -246,22 +241,20 @@ public class RedisShardBackplaneTest {
             .setRequeueAttempts(STARTING_REQUEUE_AMOUNT)
             .build();
     BalancedRedisQueue subQueue = mock(BalancedRedisQueue.class);
-    ExecutionQueueEntry executionQueueEntry =
-        new ExecutionQueueEntry(subQueue, /* balancedQueueEntry= */ null, queueEntry);
+    BalancedQueueEntry<QueueEntry> balancedQueueEntry = new BalancedQueueEntry<>(null, queueEntry);
+    ExecutionQueueEntry executionQueueEntry = new ExecutionQueueEntry(subQueue, balancedQueueEntry);
     when(state.executionQueue.dequeue(
             eq(jedis), any(List.class), any(LocalResourceSet.class), any(ExecutorService.class)))
         .thenReturn(executionQueueEntry);
-    when(subQueue.removeFromDequeue(jedis, null)).thenReturn(true);
+    when(subQueue.removeFromDequeue(jedis, balancedQueueEntry)).thenReturn(true);
     // PRE-ASSERT
-    when(state.dispatchedExecutions.insertIfMissing(eq(jedis), eq(opName), any(String.class)))
+    when(state.dispatchedExecutions.insertIfMissing(
+            eq(jedis), eq(opName), any(DispatchedOperation.class)))
         .thenAnswer(
             args -> {
               // Extract the operation that was dispatched
-              String dispatchedOperationJson = args.getArgument(2);
-              DispatchedOperation.Builder dispatchedOperationBuilder =
-                  DispatchedOperation.newBuilder();
-              JsonFormat.parser().merge(dispatchedOperationJson, dispatchedOperationBuilder);
-              DispatchedOperation dispatchedOperation = dispatchedOperationBuilder.build();
+              DispatchedOperation dispatchedOperation =
+                  ShardCodec.DEFAULT_CODEC.dispatchedExecution().parse(args.getArgument(2)).value();
 
               assertThat(dispatchedOperation.getQueueEntry().getRequeueAttempts())
                   .isEqualTo(REQUEUE_AMOUNT_WHEN_DISPATCHED);
@@ -287,11 +280,13 @@ public class RedisShardBackplaneTest {
         .dequeue(
             eq(jedis), any(List.class), any(LocalResourceSet.class), any(ExecutorService.class));
     verifyNoMoreInteractions(state.executionQueue);
-    verify(subQueue, times(1)).removeFromDequeue(pipeline, null);
+    verify(subQueue, times(1)).removeFromDequeue(pipeline, balancedQueueEntry);
     verifyNoMoreInteractions(subQueue);
     verify(state.dispatchedExecutions, times(1))
         .insertIfMissing(
-            eq(pipeline), eq(queueEntry.getExecuteEntry().getOperationName()), any(String.class));
+            eq(pipeline),
+            eq(queueEntry.getExecuteEntry().getOperationName()),
+            any(DispatchedOperation.class));
     verifyNoMoreInteractions(state.dispatchedExecutions);
     verify(state.dispatchingExecutions, times(1))
         .remove(pipeline, queueEntry.getExecuteEntry().getOperationName());
@@ -328,22 +323,20 @@ public class RedisShardBackplaneTest {
             .setRequeueAttempts(STARTING_REQUEUE_AMOUNT)
             .build();
     BalancedRedisQueue subQueue = mock(BalancedRedisQueue.class);
-    ExecutionQueueEntry executionQueueEntry =
-        new ExecutionQueueEntry(subQueue, /* balancedQueueEntry= */ null, queueEntry);
+    BalancedQueueEntry<QueueEntry> balancedQueueEntry = new BalancedQueueEntry<>(null, queueEntry);
+    ExecutionQueueEntry executionQueueEntry = new ExecutionQueueEntry(subQueue, balancedQueueEntry);
     when(state.executionQueue.dequeue(
             eq(jedis), any(List.class), any(LocalResourceSet.class), any(ExecutorService.class)))
         .thenReturn(executionQueueEntry);
     when(state.executionQueue.removeFromDequeue(jedis, executionQueueEntry)).thenReturn(true);
     // PRE-ASSERT
-    when(state.dispatchedExecutions.insertIfMissing(eq(jedis), eq(opName), any(String.class)))
+    when(state.dispatchedExecutions.insertIfMissing(
+            eq(jedis), eq(opName), any(DispatchedOperation.class)))
         .thenAnswer(
             args -> {
               // Extract the operation that was dispatched
-              String dispatchedOperationJson = args.getArgument(2);
-              DispatchedOperation.Builder dispatchedOperationBuilder =
-                  DispatchedOperation.newBuilder();
-              JsonFormat.parser().merge(dispatchedOperationJson, dispatchedOperationBuilder);
-              DispatchedOperation dispatchedOperation = dispatchedOperationBuilder.build();
+              DispatchedOperation dispatchedOperation =
+                  ShardCodec.DEFAULT_CODEC.dispatchedExecution().parse(args.getArgument(2)).value();
 
               assertThat(dispatchedOperation.getQueueEntry().getRequeueAttempts())
                   .isEqualTo(REQUEUE_AMOUNT_WHEN_DISPATCHED);
@@ -369,11 +362,13 @@ public class RedisShardBackplaneTest {
         .dequeue(
             eq(jedis), any(List.class), any(LocalResourceSet.class), any(ExecutorService.class));
     verifyNoMoreInteractions(state.executionQueue);
-    verify(subQueue, times(1)).removeFromDequeue(pipeline, null);
+    verify(subQueue, times(1)).removeFromDequeue(pipeline, balancedQueueEntry);
     verifyNoMoreInteractions(subQueue);
     verify(state.dispatchedExecutions, times(1))
         .insertIfMissing(
-            eq(pipeline), eq(queueEntry.getExecuteEntry().getOperationName()), any(String.class));
+            eq(pipeline),
+            eq(queueEntry.getExecuteEntry().getOperationName()),
+            any(DispatchedOperation.class));
     verifyNoMoreInteractions(state.dispatchedExecutions);
     verify(state.dispatchingExecutions, times(1))
         .remove(pipeline, queueEntry.getExecuteEntry().getOperationName());
@@ -414,24 +409,24 @@ public class RedisShardBackplaneTest {
   }
 
   @Test
-  public void invocationsCanBeBlacklisted() throws IOException {
+  public void invocationsCanBeBlocklisted() throws IOException {
     UUID toolInvocationId = UUID.randomUUID();
     UnifiedJedis jedis = mock(UnifiedJedis.class);
-    String invocationBlacklistKey =
-        configs.getBackplane().getInvocationBlacklistPrefix() + ":" + toolInvocationId;
-    when(jedis.exists(invocationBlacklistKey)).thenReturn(true);
+    String invocationBlocklistKey =
+        configs.getBackplane().getInvocationBlocklistPrefix() + ":" + toolInvocationId;
+    when(jedis.exists(invocationBlocklistKey)).thenReturn(true);
     when(mockJedisClusterFactory.get()).thenReturn(jedis);
-    RedisShardBackplane backplane = createBackplane("invocation-blacklist-test");
+    RedisShardBackplane backplane = createBackplane("invocation-blocklist-test");
     backplane.start("startTime/test:0000", name -> {});
     assertThat(
-            backplane.isBlacklisted(
+            backplane.isBlocklisted(
                 RequestMetadata.newBuilder()
                     .setToolInvocationId(toolInvocationId.toString())
                     .build()))
         .isTrue();
 
     verify(mockJedisClusterFactory, times(1)).get();
-    verify(jedis, times(1)).exists(invocationBlacklistKey);
+    verify(jedis, times(1)).exists(invocationBlocklistKey);
   }
 
   @Test
@@ -443,15 +438,20 @@ public class RedisShardBackplaneTest {
     Set<String> workerNames = ImmutableSet.of("worker1", "worker2", "missing_worker");
 
     String storageWorkerKey = configs.getBackplane().getWorkersHashName() + "_storage";
-    Map<String, String> workersJson =
+    ShardWorker worker1 =
+        ShardWorker.newBuilder()
+            .setEndpoint("worker1")
+            .setExpireAt(9999999999999L)
+            .setWorkerType(3)
+            .setFirstRegisteredAt(1685292624000L)
+            .build();
+    ShardWorker worker2 =
+        worker1.toBuilder().setEndpoint("worker2").setFirstRegisteredAt(1685282624000L).build();
+    Map<String, String> workers =
         Map.of(
-            "worker1",
-                "{\"endpoint\": \"worker1\", \"expireAt\": \"9999999999999\", \"workerType\": 3,"
-                    + " \"firstRegisteredAt\": \"1685292624000\"}",
-            "worker2",
-                "{\"endpoint\": \"worker2\", \"expireAt\": \"9999999999999\", \"workerType\": 3,"
-                    + " \"firstRegisteredAt\": \"1685282624000\"}");
-    when(jedis.hgetAll(storageWorkerKey)).thenReturn(workersJson);
+            "worker1", ShardCodec.DEFAULT_CODEC.worker().print(worker1),
+            "worker2", ShardCodec.DEFAULT_CODEC.worker().print(worker2));
+    when(jedis.hgetAll(storageWorkerKey)).thenReturn(workers);
     Map<String, Long> workersStartTime = backplane.getWorkersStartTimeInEpochSecs(workerNames);
     assertThat(workersStartTime.size()).isEqualTo(2);
     assertThat(workersStartTime.get("worker1")).isEqualTo(1685292624L);
@@ -494,12 +494,12 @@ public class RedisShardBackplaneTest {
         .hset(
             configs.getBackplane().getWorkersHashName() + "_storage",
             "",
-            JsonFormat.printer().print(shardWorker));
+            ShardCodec.DEFAULT_CODEC.worker().print(shardWorker));
     verify(jedis, times(1))
         .hset(
             configs.getBackplane().getWorkersHashName() + "_execute",
             "",
-            JsonFormat.printer().print(shardWorker));
+            ShardCodec.DEFAULT_CODEC.worker().print(shardWorker));
     verify(jedis, times(1)).publish(anyString(), anyString());
   }
 }
